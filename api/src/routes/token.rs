@@ -149,6 +149,31 @@ pub async fn get_tokens(req: HttpRequest) -> impl Responder {
         }
 }
 
+#[get("/tokens")]
+pub async fn get_public_tokens() -> impl Responder {
+
+    let mut connection = establish_connection();
+
+    match tokens::table
+        .select(Token::as_select())
+        .filter(tokens::is_active.eq(true))
+        .load::<Token>(&mut connection) {
+            Ok(tokens) => {
+                let response = SuccessResponse::new_multiple(
+                    true,
+                    "Tokens fetched successfully".to_string(),
+                    tokens,
+                );
+                HttpResponse::Ok().json(response)
+            }
+            Err(e) => {
+                println!("Error fetching tokens: {:?}", e);
+                let response = ErrorResponse::new("Error fetching tokens");
+                HttpResponse::InternalServerError().json(response)
+            }
+        }
+}
+
 #[put("/tokens/{id}")]
 pub async fn update_token(path: Path<Uuid>, body: Json<UpdateTokenRequest>,req: HttpRequest) -> impl Responder {
 

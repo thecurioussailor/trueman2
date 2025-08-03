@@ -7,9 +7,9 @@ pub mod jwt;
 
 use routes::{
     auth::{login, signup, admin_login},
-    token::{create_token, get_tokens, update_token, delete_token},
-    market::{create_market},
-    
+    token::{create_token, get_tokens, update_token, delete_token, get_public_tokens},
+    market::{create_market, get_markets, update_market, delete_market, get_public_markets},
+
 };
 use routes::test::{get_user_profile, admin_dashboard};
 use jwt::{admin_auth, user_auth};
@@ -22,6 +22,8 @@ async fn main() -> std::io::Result<()> {
             .service(signup)
             .service(login)
             .service(admin_login)
+            .service(get_public_tokens)
+            .service(get_public_markets)
             .service(
                 web::scope("/admin")
                     .wrap(HttpAuthentication::bearer(admin_auth))
@@ -32,9 +34,9 @@ async fn main() -> std::io::Result<()> {
                     .service(update_token)
                     .service(delete_token)
                     .service(create_market)
-                    // .service(get_markets)
-                    // .service(update_market)
-                    // .service(delete_market)
+                    .service(get_markets)
+                    .service(update_market)
+                    .service(delete_market)
             )
             .service(
                 web::scope("/user")
