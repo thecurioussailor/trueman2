@@ -1,6 +1,18 @@
 // @generated automatically by Diesel CLI.
 
 diesel::table! {
+    balances (id) {
+        id -> Uuid,
+        user_id -> Uuid,
+        token_id -> Uuid,
+        amount -> Int8,
+        locked_amount -> Int8,
+        created_at -> Timestamp,
+        updated_at -> Timestamp,
+    }
+}
+
+diesel::table! {
     markets (id) {
         id -> Uuid,
         #[max_length = 20]
@@ -11,6 +23,25 @@ diesel::table! {
         tick_size -> Int8,
         is_active -> Bool,
         created_at -> Timestamp,
+    }
+}
+
+diesel::table! {
+    orders (id) {
+        id -> Uuid,
+        user_id -> Uuid,
+        market_id -> Uuid,
+        #[max_length = 10]
+        order_type -> Varchar,
+        #[max_length = 10]
+        order_kind -> Varchar,
+        price -> Nullable<Int8>,
+        quantity -> Int8,
+        filled_quantity -> Int8,
+        #[max_length = 20]
+        status -> Varchar,
+        created_at -> Timestamp,
+        updated_at -> Timestamp,
     }
 }
 
@@ -28,6 +59,18 @@ diesel::table! {
 }
 
 diesel::table! {
+    trades (id) {
+        id -> Uuid,
+        market_id -> Uuid,
+        buyer_order_id -> Uuid,
+        seller_order_id -> Uuid,
+        price -> Int8,
+        quantity -> Int8,
+        created_at -> Timestamp,
+    }
+}
+
+diesel::table! {
     users (id) {
         id -> Uuid,
         email -> Varchar,
@@ -37,8 +80,17 @@ diesel::table! {
     }
 }
 
+diesel::joinable!(balances -> tokens (token_id));
+diesel::joinable!(balances -> users (user_id));
+diesel::joinable!(orders -> markets (market_id));
+diesel::joinable!(orders -> users (user_id));
+diesel::joinable!(trades -> markets (market_id));
+
 diesel::allow_tables_to_appear_in_same_query!(
+    balances,
     markets,
+    orders,
     tokens,
+    trades,
     users,
 );

@@ -10,6 +10,17 @@ pub use model::{
     NewToken, Token,
     NewMarket, Market,
     MarketResponse,
+    OrderType, OrderKind, OrderStatus,
+    NewOrder, Order,
+    NewTrade, Trade,
+    OrderResponse,
+    TradeResponse,
+    NewBalance, Balance,
+    BalanceResponse,
+    UserBalancesResponse,
+    DepositRequest,
+    WithdrawRequest,
+    TransactionResponse,
 };
 
 pub fn establish_connection() -> PgConnection {

@@ -9,7 +9,7 @@ use routes::{
     auth::{login, signup, admin_login},
     token::{create_token, get_tokens, update_token, delete_token, get_public_tokens},
     market::{create_market, get_markets, update_market, delete_market, get_public_markets},
-
+    balance::{get_user_balance, deposit_funds, withdraw_funds},
 };
 use routes::test::{get_user_profile, admin_dashboard};
 use jwt::{admin_auth, user_auth};
@@ -24,10 +24,18 @@ async fn main() -> std::io::Result<()> {
             .service(admin_login)
             .service(get_public_tokens)
             .service(get_public_markets)
+            // Protected routes at root level
+            .service(
+                web::scope("/user")
+                            .wrap(HttpAuthentication::bearer(user_auth))
+                            .service(get_user_profile)
+                            .service(get_user_balance)
+                            .service(deposit_funds)
+                            .service(withdraw_funds)
+            )
             .service(
                 web::scope("/admin")
                     .wrap(HttpAuthentication::bearer(admin_auth))
-                    .service(get_user_profile)
                     .service(admin_dashboard)
                     .service(create_token)
                     .service(get_tokens)
@@ -37,11 +45,6 @@ async fn main() -> std::io::Result<()> {
                     .service(get_markets)
                     .service(update_market)
                     .service(delete_market)
-            )
-            .service(
-                web::scope("/user")
-                    .wrap(HttpAuthentication::bearer(user_auth))
-                    .service(get_user_profile)
             )
     })
     .bind(("127.0.0.1", 8080))?
