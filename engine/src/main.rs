@@ -1,7 +1,7 @@
 mod redis_manager;
 mod trading_engine;
 
-use redis_manager::EngineRedisManager;
+use redis_manager::{EngineRedisManager, EngineMessage, EngineResponse};
 use trading_engine::TradingEngine;
 use tokio::time::{sleep, Duration};
 use tracing::{info, error};
@@ -27,35 +27,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("🔄 Starting order processing loop...");
     
     loop {
-        match redis_manager.consume_orders(consumer_group, consumer_name, 10).await {
-            Ok(orders) => {
-                if !orders.is_empty() {
-                    info!("📥 Received {} orders to process", orders.len());
+        match redis_manager.consume_messages(consumer_group, consumer_name, 10).await {
+            Ok(messages) => {
+                if !messages.is_empty() {
+                    info!("📥 Received {} messages to process", messages.len());
                     
-                    // Process each order
-                    for (stream_id, order_request) in orders {
-                        info!("Processing order: {}", order_request.request_id);
-                        
-                        // Process the order
-                        let response = trading_engine.process_order(order_request).await;
-                        
-                        // Send response back to API
-                        if let Err(e) = redis_manager.send_response(response).await {
+                    // Process each message
+                    for (stream_id, message) in messages {
+                        let response = match message {
+                            EngineMessage::Order(order_request) => {
+                                info!("🔄 Processing order: {}", order_request.request_id);
+                                let order_response = trading_engine.process_order(order_request).await;
+                                EngineResponse::Order(order_response)
+                            }
+                            EngineMessage::Balance(balance_request) => {
+                                info!("💰 Processing balance: {}", balance_request.request_id);
+                                let balance_response = trading_engine.process_balance_request(balance_request).await;
+                                EngineResponse::Balance(balance_response)
+                            }
+                        };
+
+                        // Send unified response
+                        if let Err(e) = redis_manager.send_unified_response(response).await {
                             error!("Failed to send response: {}", e);
                         }
-                        
-                        // Acknowledge the message
+
+                        // Acknowledge message
                         if let Err(e) = redis_manager.ack_message(consumer_group, &stream_id).await {
                             error!("Failed to acknowledge message: {}", e);
                         }
                     }
                 } else {
-                    // No orders, sleep briefly
+                    // No messages, sleep briefly
                     sleep(Duration::from_millis(100)).await;
                 }
             }
             Err(e) => {
-                error!("Error consuming orders: {}", e);
+                error!("Error consuming messages: {}", e);
                 sleep(Duration::from_secs(1)).await;
             }
         }

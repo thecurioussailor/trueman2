@@ -3,15 +3,16 @@ use actix_web::web::Json;
 use serde::Serialize;
 use diesel::prelude::*;
 use crate::jwt::Claims;
+use chrono::Utc;
 use uuid::Uuid;
+use crate::redis_manager::{
+    get_redis_manager, EngineMessage, EngineProcessingResult, EngineResponse,
+    BalanceRequest, BalanceOperation
+};
 use database::{
-    establish_connection,
-    NewBalance, Balance, Token,
     DepositRequest, WithdrawRequest,
     TransactionResponse,
-    BalanceResponse,
-    UserBalancesResponse,
-    schema::{balances, tokens},
+    UserBalancesResponse
 };
 #[derive(Serialize)]
 struct ErrorResponse {
@@ -65,7 +66,7 @@ impl SuccessResponse {
 
 #[get("/balances")]
 pub async fn get_user_balance(req: HttpRequest) -> impl Responder {
-    
+
     let user_id = match req.extensions().get::<Claims>() {
         Some(claims) => {
             match Uuid::parse_str(&claims.user_id) {
@@ -81,44 +82,39 @@ pub async fn get_user_balance(req: HttpRequest) -> impl Responder {
             return HttpResponse::Unauthorized().json(response);
         }
     };
-
-    let mut connection = establish_connection();
-
-    let balances_result = balances::table
-        .inner_join(tokens::table)
-        .filter(balances::user_id.eq(user_id))
-        .select((Balance::as_select(), Token::as_select()))
-        .load::<(Balance, Token)>(&mut connection);
-
-        match balances_result {
-            Ok(balance_tokens) => {
-                let balance_responses: Vec<BalanceResponse> = balance_tokens
-                    .into_iter()
-                    .map(|(balance, token)| BalanceResponse::from((balance, token)))
-                    .collect();
     
-                let user_balances = UserBalancesResponse {
-                    user_id,
-                    balances: balance_responses,
-                };
+    // Create balance request for engine
+    let balance_request = BalanceRequest {
+        request_id: Uuid::new_v4().to_string(),
+        user_id,
+        token_id: Uuid::nil(), // Not needed for balance query
+        operation: BalanceOperation::GetBalances,
+        amount: 0,
+        timestamp: Utc::now().timestamp_millis(),
+    };
     
-                HttpResponse::Ok().json(SuccessResponse::new_single(
-                    true,
-                    "Balances retrieved successfully".to_string(),
-                    Some(user_balances),
-                ))
-            }
-            Err(e) => {
-                println!("Error retrieving balances: {:?}", e);
-                HttpResponse::InternalServerError().json(ErrorResponse::new(
-                    "Error retrieving balances",
-                ))
+    let redis_manager = get_redis_manager().await;
+
+    match redis_manager.send_and_wait(EngineMessage::Balance(balance_request), 3).await {
+        EngineProcessingResult::Success(EngineResponse::Balance(response)) => {
+            if response.success {
+                HttpResponse::Ok().json(response.balances)
+            } else {
+                HttpResponse::InternalServerError().json(response.message)
             }
         }
-
+        EngineProcessingResult::Timeout => {
+            HttpResponse::RequestTimeout().json("Balance request timed out")
+        }
+        EngineProcessingResult::Error(e) => {
+            HttpResponse::InternalServerError().json(format!("Error: {}", e))
+        }
+        _ => {
+            HttpResponse::InternalServerError().json("Unexpected response type")
+        }
+    }
 }
 
-// POST /deposit - Deposit dummy funds
 #[post("/deposit")]
 pub async fn deposit_funds(req: HttpRequest, body: Json<DepositRequest>) -> impl Responder {
     let user_id = match req.extensions().get::<Claims>() {
@@ -136,90 +132,53 @@ pub async fn deposit_funds(req: HttpRequest, body: Json<DepositRequest>) -> impl
             return HttpResponse::Unauthorized().json(response);
         }
     };
-
     let body = body.into_inner();
-
-    // Validate deposit amount
+    
+    // Validate request
     if body.amount <= 0 {
-        let response = ErrorResponse::new("Deposit amount must be positive");
-        return HttpResponse::BadRequest().json(response);
+        return HttpResponse::BadRequest().json("Invalid amount");
     }
-
-    let mut connection = establish_connection();
-
-    // Check if token exists and is active
-    let token = match tokens::table
-        .filter(tokens::id.eq(body.token_id))
-        .filter(tokens::is_active.eq(true))
-        .first::<Token>(&mut connection) {
-        Ok(token) => token,
-        Err(diesel::NotFound) => {
-            let response = ErrorResponse::new("Token not found or inactive");
-            return HttpResponse::BadRequest().json(response);
-        }
-        Err(e) => {
-            println!("Error checking token: {:?}", e);
-            let response = ErrorResponse::new("Error processing deposit");
-            return HttpResponse::InternalServerError().json(response);
-        }
+    
+    // Create deposit request for engine
+    let deposit_request = BalanceRequest {
+        request_id: Uuid::new_v4().to_string(),
+        user_id,
+        token_id: body.token_id,
+        operation: BalanceOperation::Deposit,
+        amount: body.amount,
+        timestamp: Utc::now().timestamp_millis(),
     };
-
-    // Try to update existing balance or create new one
-    let balance_result = connection.transaction::<_, diesel::result::Error, _>(|conn| {
-        // Check if balance already exists
-        let existing_balance = balances::table
-            .filter(balances::user_id.eq(user_id))
-            .filter(balances::token_id.eq(body.token_id))
-            .first::<Balance>(conn)
-            .optional()?;
-
-        match existing_balance {
-            Some(balance) => {
-                // Update existing balance
-                let new_amount = balance.amount + body.amount;
-                diesel::update(balances::table)
-                    .filter(balances::id.eq(balance.id))
-                    .set((
-                        balances::amount.eq(new_amount),
-                        balances::updated_at.eq(diesel::dsl::now),
-                    ))
-                    .execute(conn)?;
-                Ok(new_amount)
-            }
-            None => {
-                // Create new balance
-                let new_balance = NewBalance::new(user_id, body.token_id, body.amount);
-                diesel::insert_into(balances::table)
-                    .values(&new_balance)
-                    .execute(conn)?;
-                Ok(body.amount)
-            }
+    
+    // Send to engine via Redis queue
+    let redis_manager = get_redis_manager().await;
+    match redis_manager.send_and_wait(EngineMessage::Balance(deposit_request), 5).await {
+        EngineProcessingResult::Success(EngineResponse::Balance(response)) => {
+            HttpResponse::Ok().json(TransactionResponse {
+                success: response.success,
+                message: response.message,
+                new_balance: Some(response.new_balance),
+            })
         }
-    });
-
-    match balance_result {
-        Ok(new_balance) => {
-            let transaction_response = TransactionResponse {
+        EngineProcessingResult::Timeout => {
+            HttpResponse::Ok().json(TransactionResponse {
                 success: true,
-                message: format!("Successfully deposited {} {}", body.amount, token.symbol),
-                new_balance: Some(new_balance),
-            };
-
-            HttpResponse::Ok().json(SuccessResponse::new_transaction(
-                true,
-                "Deposit successful".to_string(),
-                Some(transaction_response),
-            ))
+                message: "Deposit is being processed".to_string(),
+                new_balance: None,
+            })
         }
-        Err(e) => {
-            println!("Error processing deposit: {:?}", e);
-            let response = ErrorResponse::new("Error processing deposit");
-            HttpResponse::InternalServerError().json(response)
+        EngineProcessingResult::Error(e) => {
+            HttpResponse::InternalServerError().json(TransactionResponse {
+                success: false,
+                message: e,
+                new_balance: None,
+            })
+        }
+        _ => {
+            HttpResponse::InternalServerError().json("Unexpected response type")
         }
     }
 }
 
-// POST /withdraw - Withdraw funds (limited to available balance)
 #[post("/withdraw")]
 pub async fn withdraw_funds(req: HttpRequest, body: Json<WithdrawRequest>) -> impl Responder {
     let user_id = match req.extensions().get::<Claims>() {
@@ -240,83 +199,54 @@ pub async fn withdraw_funds(req: HttpRequest, body: Json<WithdrawRequest>) -> im
 
     let body = body.into_inner();
 
-    // Validate withdrawal amount
     if body.amount <= 0 {
-        let response = ErrorResponse::new("Withdrawal amount must be positive");
-        return HttpResponse::BadRequest().json(response);
+        return HttpResponse::BadRequest().json("Withdrawal amount must be positive");
     }
 
-    let mut connection = establish_connection();
-
-    // Check if token exists and is active
-    let token = match tokens::table
-        .filter(tokens::id.eq(body.token_id))
-        .filter(tokens::is_active.eq(true))
-        .first::<Token>(&mut connection) {
-        Ok(token) => token,
-        Err(diesel::NotFound) => {
-            let response = ErrorResponse::new("Token not found or inactive");
-            return HttpResponse::BadRequest().json(response);
-        }
-        Err(e) => {
-            println!("Error checking token: {:?}", e);
-            let response = ErrorResponse::new("Error processing withdrawal");
-            return HttpResponse::InternalServerError().json(response);
-        }
+    // Create withdrawal request for engine
+    let withdraw_request = BalanceRequest {
+        request_id: Uuid::new_v4().to_string(),
+        user_id,
+        token_id: body.token_id,
+        operation: BalanceOperation::Withdraw,
+        amount: body.amount,
+        timestamp: Utc::now().timestamp_millis(),
     };
 
-    // Process withdrawal
-    let withdrawal_result = connection.transaction::<_, diesel::result::Error, _>(|conn| {
-        // Get current balance
-        let balance = balances::table
-            .filter(balances::user_id.eq(user_id))
-            .filter(balances::token_id.eq(body.token_id))
-            .first::<Balance>(conn)?;
-
-        // Check if user has sufficient available balance
-        if !balance.can_withdraw(body.amount) {
-            return Err(diesel::result::Error::RollbackTransaction);
+    // Send unified message to engine
+    let redis_manager = get_redis_manager().await;
+    match redis_manager.send_and_wait(EngineMessage::Balance(withdraw_request), 5).await {
+        EngineProcessingResult::Success(EngineResponse::Balance(response)) => {
+            if response.success {
+                HttpResponse::Ok().json(TransactionResponse {
+                    success: true,
+                    message: response.message,
+                    new_balance: Some(response.new_balance),
+                })
+            } else {
+                HttpResponse::BadRequest().json(TransactionResponse {
+                    success: false,
+                    message: response.message,
+                    new_balance: None,
+                })
+            }
         }
-
-        // Update balance
-        let new_amount = balance.amount - body.amount;
-        diesel::update(balances::table)
-            .filter(balances::id.eq(balance.id))
-            .set((
-                balances::amount.eq(new_amount),
-                balances::updated_at.eq(diesel::dsl::now),
-            ))
-            .execute(conn)?;
-
-        Ok(new_amount)
-    });
-
-    match withdrawal_result {
-        Ok(new_balance) => {
-            let transaction_response = TransactionResponse {
+        EngineProcessingResult::Timeout => {
+            HttpResponse::Ok().json(TransactionResponse {
                 success: true,
-                message: format!("Successfully withdrew {} {}", body.amount, token.symbol),
-                new_balance: Some(new_balance),
-            };
-
-            HttpResponse::Ok().json(SuccessResponse::new_transaction(
-                true,
-                "Withdrawal successful".to_string(),
-                Some(transaction_response),
-            ))
+                message: "Withdrawal is being processed".to_string(),
+                new_balance: None,
+            })
         }
-        Err(diesel::result::Error::RollbackTransaction) => {
-            let response = ErrorResponse::new("Insufficient available balance");
-            HttpResponse::BadRequest().json(response)
+        EngineProcessingResult::Error(e) => {
+            HttpResponse::BadRequest().json(TransactionResponse {
+                success: false,
+                message: e,
+                new_balance: None,
+            })
         }
-        Err(diesel::NotFound) => {
-            let response = ErrorResponse::new("No balance found for this token");
-            HttpResponse::BadRequest().json(response)
-        }
-        Err(e) => {
-            println!("Error processing withdrawal: {:?}", e);
-            let response = ErrorResponse::new("Error processing withdrawal");
-            HttpResponse::InternalServerError().json(response)
+        _ => {
+            HttpResponse::InternalServerError().json("Unexpected response type")
         }
     }
 }

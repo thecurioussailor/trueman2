@@ -3,9 +3,10 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use chrono::Utc;
 use crate::jwt::Claims;
-use crate::redis_manager::{OrderRequest, OrderProcessingResult, get_redis_manager};
-use database::{OrderType, OrderKind};
-
+use crate::redis_manager::{
+    get_redis_manager, EngineMessage, EngineProcessingResult, EngineResponse,
+    OrderRequest
+};
 #[derive(Deserialize, Debug)]
 pub struct CreateOrderRequest {
     pub market_id: Uuid,
@@ -38,38 +39,14 @@ pub async fn create_order(req: HttpRequest, body: Json<CreateOrderRequest>) -> i
     };
 
     let body = body.into_inner();
-    println!("body: {:?}", body);
-
-    // Validate order data
-    if body.quantity <= 0 {
-        return HttpResponse::BadRequest().json("Order quantity must be positive");
-    }
-
-    let order_type = match body.order_type.as_str() {
-        "Buy" => OrderType::Buy,
-        "Sell" => OrderType::Sell,
-        _ => return HttpResponse::BadRequest().json("Invalid order type"),
-    };
-
-    let order_kind = match body.order_kind.as_str() {
-        "Market" => OrderKind::Market,
-        "Limit" => OrderKind::Limit,
-        _ => return HttpResponse::BadRequest().json("Invalid order kind"),
-    };
-
-    // Validate limit orders have price
-    if matches!(order_kind, OrderKind::Limit) && body.price.is_none() {
-        return HttpResponse::BadRequest().json("Limit orders must have a price");
-    }
 
     // Create order request
-    let request_id = Uuid::new_v4().to_string();
     let order_request = OrderRequest {
-        request_id: request_id.clone(),
+        request_id: Uuid::new_v4().to_string(),
         user_id,
         market_id: body.market_id,
-        order_type: order_type.to_string(),
-        order_kind: order_kind.to_string(),
+        order_type: body.order_type,
+        order_kind: body.order_kind,
         price: body.price,
         quantity: body.quantity,
         timestamp: Utc::now().timestamp_millis(),
@@ -77,51 +54,19 @@ pub async fn create_order(req: HttpRequest, body: Json<CreateOrderRequest>) -> i
 
     // Send to engine and wait for response
     let redis_manager = get_redis_manager().await;
-    match redis_manager.send_and_wait(order_request, 5).await {
-        OrderProcessingResult::Success(response) => {
-            let result = OrderResult {
-                success: response.success,
-                message: response.message,
-                request_id: response.request_id,
-                status: response.status,
-                order_id: response.order_id,
-                filled_quantity: response.filled_quantity,
-                trades: response.trades.map(|trades| 
-                    trades.into_iter()
-                        .map(|t| serde_json::to_value(t).unwrap())
-                        .collect()
-                ),
-            };
-            
-            if response.success {
-                HttpResponse::Ok().json(result)
-            } else {
-                HttpResponse::BadRequest().json(result)
-            }
+    
+    match redis_manager.send_and_wait(EngineMessage::Order(order_request), 5).await {
+        EngineProcessingResult::Success(EngineResponse::Order(response)) => {
+            HttpResponse::Ok().json(response)
         }
-        OrderProcessingResult::Timeout => {
-            let result = OrderResult {
-                success: true,
-                message: "Order submitted successfully and is being processed".to_string(),
-                request_id,
-                status: "PROCESSING".to_string(),
-                order_id: None,
-                filled_quantity: None,
-                trades: None,
-            };
-            HttpResponse::Ok().json(result)
+        EngineProcessingResult::Timeout => {
+            HttpResponse::Ok().json("Order is being processed")
         }
-        OrderProcessingResult::Error(error) => {
-            let result = OrderResult {
-                success: false,
-                message: format!("Order failed: {}", error),
-                request_id,
-                status: "REJECTED".to_string(),
-                order_id: None,
-                filled_quantity: None,
-                trades: None,
-            };
-            HttpResponse::BadRequest().json(result)
+        EngineProcessingResult::Error(e) => {
+            HttpResponse::BadRequest().json(format!("Order failed: {}", e))
+        }
+        _ => {
+            HttpResponse::InternalServerError().json("Unexpected response type")
         }
     }
 }

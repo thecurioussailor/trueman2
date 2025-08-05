@@ -125,11 +125,20 @@ impl TradingEngine {
     
     /// Main order processing function
     pub async fn process_order(&mut self, order_request: crate::redis_manager::OrderRequest) -> crate::redis_manager::OrderResponse {
+        
+        tracing::info!("🔄 Processing order: {} {} {} @ {:?}", 
+            order_request.order_type,
+            order_request.quantity,
+            order_request.order_kind,
+            order_request.price
+        );
+        
         // 1. Convert request to internal order
         let order = self.create_order_from_request(order_request.clone());
         
-        // 2. Validate balances
+        // 2. Validate balances (now we have balance data!)
         if !self.validate_order_balance(&order) {
+            tracing::warn!("❌ Order rejected: Insufficient balance");
             return crate::redis_manager::OrderResponse {
                 request_id: order_request.request_id,
                 success: false,
@@ -163,6 +172,7 @@ impl TradingEngine {
             self.operations_since_snapshot = 0;
         }
         
+        tracing::info!("✅ Order processed successfully: {} trades executed", trades.len());
         // 8. Return response
         crate::redis_manager::OrderResponse {
             request_id: order_request.request_id,
@@ -410,15 +420,33 @@ impl TradingEngine {
         }
     }
     
+    /// Enhanced balance validation (now actually checks in-memory balances)
     fn validate_order_balance(&self, order: &Order) -> bool {
-        // Simplified balance validation
-        // In real implementation, check user's token balances
-        true // For now, always return true
+        if let Some(user_balance) = self.balances.get(&order.user_id) {
+            // For now, simplified validation
+            // In real implementation, you'd:
+            // 1. Get the market's base/quote tokens
+            // 2. Calculate required balance based on order type
+            // 3. Check if user has sufficient available balance
+            
+            // Simplified: assume we're checking if user has any balance
+            return !user_balance.token_balances.is_empty();
+        }
+        
+        // No balance found for user
+        false
     }
     
+    /// Update balances based on executed trades
     async fn update_balances_from_trades(&mut self, trades: &[Trade]) {
-        // Update user balances based on executed trades
-        // Implementation depends on your token/balance structure
+        for trade in trades {
+            // Update buyer balance (reduce quote token, increase base token)
+            // Update seller balance (reduce base token, increase quote token)
+            // For now, this is simplified - you'd need market token pair info
+            
+            tracing::debug!("Updating balances for trade: {} @ {}", trade.quantity, trade.price);
+            // TODO: Implement actual balance updates based on your token pair logic
+        }
     }
     
     async fn update_ticker_from_trades(&mut self, trades: &[Trade]) {
@@ -478,4 +506,242 @@ impl TradingEngine {
             timestamp: orderbook.last_updated,
         }
     }
+
+    /// 💰 Process balance requests (deposits, withdrawals, queries)
+    pub async fn process_balance_request(
+        &mut self,
+        balance_request: crate::redis_manager::BalanceRequest
+    ) -> crate::redis_manager::BalanceResponse {
+        match balance_request.operation {
+            crate::redis_manager::BalanceOperation::Deposit => {
+                self.process_deposit(balance_request).await
+            }
+            crate::redis_manager::BalanceOperation::Withdraw => {
+                self.process_withdrawal(balance_request).await
+            }
+            crate::redis_manager::BalanceOperation::GetBalances => {
+                self.get_user_balances(balance_request).await
+            }
+        }
+    }
+    
+    /// Process deposit request
+    async fn process_deposit(&mut self, request: crate::redis_manager::BalanceRequest) -> crate::redis_manager::BalanceResponse {
+        tracing::info!("💳 Processing deposit: {} {} for user {}", 
+            request.amount, 
+            request.token_id, 
+            request.user_id
+        );
+    
+        // Get or create user balance and update it
+        let (new_balance, locked_amount) = {
+            // Get or create user balance
+            let user_balance = self.balances.entry(request.user_id).or_insert_with(|| UserBalance {
+                user_id: request.user_id,
+                token_balances: HashMap::new(),
+            });
+            
+            // Add to available balance
+            let token_balance = user_balance.token_balances.entry(request.token_id).or_insert_with(|| TokenBalance {
+                available: 0,
+                locked: 0,
+            });
+            
+            token_balance.available += request.amount;
+            
+            // Extract the values we need
+            (token_balance.available, token_balance.locked)
+        }; // 🔑 The mutable borrow to self.balances is released here
+        
+        // Now we can safely call methods that need mutable self
+        // Queue database update (async, non-blocking)
+        self.queue_balance_db_update(
+            request.user_id, 
+            request.token_id, 
+            new_balance, 
+            locked_amount
+        ).await;
+        
+        // Take snapshot if needed
+        self.operations_since_snapshot += 1;
+        if self.operations_since_snapshot >= self.snapshot_interval {
+            self.take_snapshots().await;
+            self.operations_since_snapshot = 0;
+        }
+        
+        tracing::info!("✅ Deposit processed successfully. New balance: {}", new_balance);
+        
+        crate::redis_manager::BalanceResponse {
+            request_id: request.request_id,
+            success: true,
+            message: format!("Successfully deposited {}", request.amount),
+            new_balance,
+            balances: None,
+        }
+    }
+    
+    /// Process withdrawal request
+    async fn process_withdrawal(&mut self, request: crate::redis_manager::BalanceRequest) -> crate::redis_manager::BalanceResponse {
+        tracing::info!("💸 Processing withdrawal: {} {} for user {}", 
+            request.amount, 
+            request.token_id, 
+            request.user_id
+        );
+    
+        // Check if user has sufficient balance and get the new balance value
+        let withdrawal_result = {
+            if let Some(user_balance) = self.balances.get_mut(&request.user_id) {
+                if let Some(token_balance) = user_balance.token_balances.get_mut(&request.token_id) {
+                    let available_balance = token_balance.available - token_balance.locked;
+                    
+                    if available_balance >= request.amount {
+                        // Process withdrawal
+                        token_balance.available -= request.amount;
+                        let new_balance = token_balance.available;
+                        let locked_amount = token_balance.locked;
+                        
+                        // Return success with the new balance values
+                        Some((new_balance, locked_amount))
+                    } else {
+                        tracing::warn!("❌ Insufficient balance for withdrawal. Available: {}, Requested: {}", 
+                            available_balance, request.amount);
+                        None
+                    }
+                } else {
+                    tracing::warn!("❌ No token balance found for token {}", request.token_id);
+                    None
+                }
+            } else {
+                tracing::warn!("❌ No user balance found for user {}", request.user_id);
+                None
+            }
+        }; // 🔑 The mutable borrow to self.balances is released here
+    
+        // Now we can safely call methods that need mutable self
+        match withdrawal_result {
+            Some((new_balance, locked_amount)) => {
+                // Queue database update (now safe because previous borrow is released)
+                self.queue_balance_db_update(
+                    request.user_id, 
+                    request.token_id, 
+                    new_balance, 
+                    locked_amount
+                ).await;
+                
+                // Take snapshot if needed
+                self.operations_since_snapshot += 1;
+                if self.operations_since_snapshot >= self.snapshot_interval {
+                    self.take_snapshots().await;
+                    self.operations_since_snapshot = 0;
+                }
+                
+                tracing::info!("✅ Withdrawal processed successfully. New balance: {}", new_balance);
+                
+                crate::redis_manager::BalanceResponse {
+                    request_id: request.request_id,
+                    success: true,
+                    message: format!("Successfully withdrew {}", request.amount),
+                    new_balance,
+                    balances: None,
+                }
+            }
+            None => {
+                // Insufficient balance or user not found
+                crate::redis_manager::BalanceResponse {
+                    request_id: request.request_id,
+                    success: false,
+                    message: "Insufficient balance or user not found".to_string(),
+                    new_balance: 0,
+                    balances: None,
+                }
+            }
+        }
+    }
+    
+    /// Get user balances for all tokens
+    async fn get_user_balances(&self, request: crate::redis_manager::BalanceRequest) -> crate::redis_manager::BalanceResponse {
+        tracing::info!("📊 Getting balances for user {}", request.user_id);
+
+        let balances = if let Some(user_balance) = self.balances.get(&request.user_id) {
+            user_balance.token_balances.iter().map(|(&token_id, balance)| {
+                crate::redis_manager::UserTokenBalance {
+                    token_id,
+                    available: balance.available,
+                    locked: balance.locked,
+                }
+            }).collect()
+        } else {
+            tracing::info!("No balances found for user {}", request.user_id);
+            Vec::new()
+        };
+        
+        tracing::info!("✅ Retrieved {} token balances for user", balances.len());
+        
+        crate::redis_manager::BalanceResponse {
+            request_id: request.request_id,
+            success: true,
+            message: "Balances retrieved successfully".to_string(),
+            new_balance: 0, // Not applicable for balance queries
+            balances: Some(balances),
+        }
+    }
+    
+    /// Queue balance update for database persistence
+    async fn queue_balance_db_update(&mut self, user_id: Uuid, token_id: Uuid, available: i64, locked: i64) {
+        let balance_event = DBUpdateEvent::BalanceUpdated {
+            user_id,
+            token_id, 
+            available,
+            locked,
+        };
+        
+        let mut conn = self.redis_manager.clone();
+        let balance_json = serde_json::to_string(&balance_event).unwrap();
+        
+        let _: Result<String, _> = redis::cmd("XADD")
+            .arg("db_update_queue")
+            .arg("*")
+            .arg("type")
+            .arg("balance_updated")
+            .arg("data")
+            .arg(&balance_json)
+            .arg("timestamp")
+            .arg(chrono::Utc::now().timestamp_millis())
+            .query_async(&mut conn)
+            .await;
+            
+        tracing::debug!("📤 Queued balance DB update for user {} token {}", user_id, token_id);
+    }
+
+    /// Load initial balances from database snapshots
+    pub async fn load_balance_snapshots(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let mut conn = self.redis_manager.clone();
+        tracing::info!("📥 Loading balance snapshots from Redis...");
+        
+        // Get all snapshot keys
+        let snapshot_keys: Vec<String> = redis::cmd("KEYS")
+            .arg("snapshot:balance:*")
+            .query_async(&mut conn)
+            .await
+            .unwrap_or_default();
+        
+        let mut loaded_count = 0;
+        
+        for key in snapshot_keys {
+            if let Ok(snapshot_data) = redis::cmd("GET")
+                .arg(&key)
+                .query_async::<_, String>(&mut conn)
+                .await
+            {
+                if let Ok(user_balance) = serde_json::from_str::<UserBalance>(&snapshot_data) {
+                    self.balances.insert(user_balance.user_id, user_balance);
+                    loaded_count += 1;
+                }
+            }
+        }
+        
+        tracing::info!("✅ Loaded {} balance snapshots", loaded_count);
+        Ok(())
+    }
+
 }

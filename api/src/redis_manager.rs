@@ -5,6 +5,22 @@ use tokio::time::{timeout, Duration};
 use chrono::Utc;
 use futures_util::StreamExt;
 
+// Unified message types
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum EngineMessage {
+    Order(OrderRequest),
+    Balance(BalanceRequest),
+    // Future: Trade queries, market data requests, etc.
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum EngineResponse {
+    Order(OrderResponse),
+    Balance(BalanceResponse),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderRequest {
     pub request_id: String,
@@ -15,6 +31,23 @@ pub struct OrderRequest {
     pub price: Option<i64>,
     pub quantity: i64,
     pub timestamp: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BalanceRequest {
+    pub request_id: String,
+    pub user_id: Uuid,
+    pub token_id: Uuid,
+    pub operation: BalanceOperation,
+    pub amount: i64,
+    pub timestamp: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum BalanceOperation {
+    Deposit,
+    Withdraw,
+    GetBalances,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,6 +64,23 @@ pub struct OrderResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BalanceResponse {
+    pub request_id: String,
+    pub success: bool,
+    pub message: String,
+    pub new_balance: i64,
+    pub balances: Option<Vec<UserTokenBalance>>,
+}
+
+// Unified result type
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum EngineProcessingResult {
+    Success(EngineResponse),
+    Timeout,
+    Error(String),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TradeInfo {
     pub trade_id: Uuid,
     pub price: i64,
@@ -39,12 +89,18 @@ pub struct TradeInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserTokenBalance {
+    pub token_id: Uuid,
+    pub available: i64,
+    pub locked: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum OrderProcessingResult {
     Success(OrderResponse),
     Timeout,
     Error(String),
 }
-
 pub struct RedisManager {
     connection_manager: ConnectionManager,
     client: Client,
@@ -65,14 +121,17 @@ impl RedisManager {
     /// This is what the API will use for all order operations
     pub async fn send_and_wait(
         &self,
-        order_request: OrderRequest,
+        message: EngineMessage,
         timeout_secs: u64,
-    ) -> OrderProcessingResult {
-        let request_id = order_request.request_id.clone();
+    ) -> EngineProcessingResult {
+        let request_id = match &message {
+            EngineMessage::Order(req) => req.request_id.clone(),
+            EngineMessage::Balance(req) => req.request_id.clone(),
+        };
         
         // Step 1: Subscribe to response channel BEFORE queuing
         // This prevents race conditions
-        let response_channel = format!("order_response:{}", request_id);
+        let response_channel = format!("engine_response:{}", request_id);
         
         let subscribe_result = async {
             let conn = self.client.get_async_connection().await?;
@@ -83,12 +142,12 @@ impl RedisManager {
         
         let mut pubsub = match subscribe_result {
             Ok(ps) => ps,
-            Err(e) => return OrderProcessingResult::Error(format!("Failed to subscribe: {}", e)),
+            Err(e) => return EngineProcessingResult::Error(format!("Failed to subscribe: {}", e)),
         };
         
-        // Step 2: Queue the order
-        if let Err(e) = self.queue_order_internal(order_request).await {
-            return OrderProcessingResult::Error(format!("Failed to queue order: {}", e));
+        // Step 2: Queue the message
+        if let Err(e) = self.queue_message_internal(message).await {
+            return EngineProcessingResult::Error(format!("Failed to queue message: {}", e));
         }
         
         // Step 3: Wait for response with timeout
@@ -99,7 +158,7 @@ impl RedisManager {
                         let payload: Result<String, _> = msg.get_payload();
                         match payload {
                             Ok(response_str) => {
-                                match serde_json::from_str::<OrderResponse>(&response_str) {
+                                match serde_json::from_str::<EngineResponse>(&response_str) {
                                     Ok(response) => return Ok(response),
                                     Err(e) => {
                                         println!("Failed to parse response: {}", e);
@@ -122,31 +181,37 @@ impl RedisManager {
         }).await;
         
         match wait_result {
-            Ok(Ok(response)) => OrderProcessingResult::Success(response),
-            Ok(Err(e)) => OrderProcessingResult::Error(e),
-            Err(_) => OrderProcessingResult::Timeout,
+            Ok(Ok(response)) => EngineProcessingResult::Success(response),
+            Ok(Err(e)) => EngineProcessingResult::Error(e),
+            Err(_) => EngineProcessingResult::Timeout,
         }
     }
 
     /// Internal function to queue order to Redis Stream
-    async fn queue_order_internal(&self, order_request: OrderRequest) -> Result<String, redis::RedisError> {
+    async fn queue_message_internal(&self, message: EngineMessage) -> Result<String, redis::RedisError> {
         let mut conn = self.connection_manager.clone();
-        let order_json = serde_json::to_string(&order_request).unwrap();
+        let message_json = serde_json::to_string(&message).unwrap();
         
+        let (request_id, message_type) = match &message {
+            EngineMessage::Order(req) => (req.request_id.clone(), "ORDER"),
+            EngineMessage::Balance(req) => (req.request_id.clone(), "BALANCE"),
+        };
         // Add to Redis Stream - this is what the engine will consume
         let stream_id: String = redis::cmd("XADD")
-            .arg("order_processing_queue") // Queue name
+            .arg("engine_processing_queue") // Queue name
             .arg("*") // Auto-generate stream ID
             .arg("request_id")
-            .arg(&order_request.request_id)
+            .arg(&request_id)
+            .arg("message_type")
+            .arg(&message_type)
             .arg("data")
-            .arg(&order_json) 
+            .arg(&message_json) 
             .arg("timestamp")
-            .arg(order_request.timestamp)
+            .arg(Utc::now().timestamp_millis())
             .query_async(&mut conn)
             .await?;
             
-        println!("✅ Queued order {} to stream {}", order_request.request_id, stream_id);
+        println!("✅ Queued {} message {} to stream {}", message_type, request_id, stream_id);
         Ok(stream_id)
     }
 }
