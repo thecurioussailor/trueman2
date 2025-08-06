@@ -82,7 +82,7 @@ pub async fn get_user_balance(req: HttpRequest) -> impl Responder {
             return HttpResponse::Unauthorized().json(response);
         }
     };
-    
+    println!("user_id: {:?}", user_id);
     // Create balance request for engine
     let balance_request = BalanceRequest {
         request_id: Uuid::new_v4().to_string(),

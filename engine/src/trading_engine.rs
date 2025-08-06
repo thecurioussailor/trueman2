@@ -119,7 +119,7 @@ impl TradingEngine {
             tickers: HashMap::new(),
             redis_manager,
             operations_since_snapshot: 0,
-            snapshot_interval: 100, // Snapshot every 100 operations
+            snapshot_interval: 10, // Snapshot every 10 operations
         })
     }
     
@@ -361,48 +361,110 @@ impl TradingEngine {
     }
     
     /// Take periodic snapshots for recovery
-    async fn take_snapshots(&mut self) {
-        let mut conn = self.redis_manager.clone();
-        let timestamp = Utc::now().timestamp_millis();
+async fn take_snapshots(&mut self) {
+    tracing::info!("💾 Starting snapshot process...");
+    tracing::info!("📊 Current state: {} balances, {} orderbooks, {} tickers", 
+        self.balances.len(), 
+        self.orderbooks.len(), 
+        self.tickers.len()
+    );
+    
+    let mut conn = self.redis_manager.clone();
+    let timestamp = Utc::now().timestamp_millis();
+    let mut snapshot_count = 0;
+    
+    // Snapshot balances (most important)
+    for (user_id, balance) in &self.balances {
+        let key = format!("snapshot:balance:{}", user_id);
+        tracing::debug!("💾 Saving balance snapshot for user: {}", user_id);
         
-        // Snapshot orderbooks
-        for (market_id, orderbook) in &self.orderbooks {
-            let key = format!("snapshot:orderbook:{}", market_id);
-            let _: Result<(), _> = redis::cmd("SET")
-                .arg(key)
-                .arg(serde_json::to_string(orderbook).unwrap())
-                .arg("EX")
-                .arg(3600) // 1 hour TTL
-                .query_async(&mut conn)
-                .await;
+        match serde_json::to_string(balance) {
+            Ok(balance_json) => {
+                match redis::cmd("SET")
+                    .arg(&key)
+                    .arg(&balance_json)
+                    .arg("EX")
+                    .arg(3600)
+                    .query_async::<_, ()>(&mut conn)
+                    .await
+                {
+                    Ok(_) => {
+                        snapshot_count += 1;
+                        tracing::debug!("✅ Balance snapshot saved: {}", key);
+                    }
+                    Err(e) => {
+                        tracing::error!("❌ Failed to save balance snapshot {}: {}", key, e);
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!("❌ Failed to serialize balance for {}: {}", user_id, e);
+            }
         }
-        
-        // Snapshot balances
-        for (user_id, balance) in &self.balances {
-            let key = format!("snapshot:balance:{}", user_id);
-            let _: Result<(), _> = redis::cmd("SET")
-                .arg(key)
-                .arg(serde_json::to_string(balance).unwrap())
-                .arg("EX")
-                .arg(3600)
-                .query_async(&mut conn)
-                .await;
-        }
-        
-        // Snapshot tickers
-        for (market_id, ticker) in &self.tickers {
-            let key = format!("snapshot:ticker:{}", market_id);
-            let _: Result<(), _> = redis::cmd("SET")
-                .arg(key)
-                .arg(serde_json::to_string(ticker).unwrap())
-                .arg("EX")
-                .arg(300) // 5 minutes TTL (tickers change frequently)
-                .query_async(&mut conn)
-                .await;
-        }
-        
-        tracing::info!("💾 Took snapshots at {}", timestamp);
     }
+    
+    // Snapshot orderbooks
+    for (market_id, orderbook) in &self.orderbooks {
+        let key = format!("snapshot:orderbook:{}", market_id);
+        tracing::debug!("💾 Saving orderbook snapshot for market: {}", market_id);
+        
+        match serde_json::to_string(orderbook) {
+            Ok(orderbook_json) => {
+                match redis::cmd("SET")
+                    .arg(&key)
+                    .arg(&orderbook_json)
+                    .arg("EX")
+                    .arg(3600)
+                    .query_async::<_, ()>(&mut conn)
+                    .await
+                {
+                    Ok(_) => {
+                        snapshot_count += 1;
+                        tracing::debug!("✅ Orderbook snapshot saved: {}", key);
+                    }
+                    Err(e) => {
+                        tracing::error!("❌ Failed to save orderbook snapshot {}: {}", key, e);
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!("❌ Failed to serialize orderbook for {}: {}", market_id, e);
+            }
+        }
+    }
+    
+    // Snapshot tickers
+    for (market_id, ticker) in &self.tickers {
+        let key = format!("snapshot:ticker:{}", market_id);
+        tracing::debug!("💾 Saving ticker snapshot for market: {}", market_id);
+        
+        match serde_json::to_string(ticker) {
+            Ok(ticker_json) => {
+                match redis::cmd("SET")
+                    .arg(&key)
+                    .arg(&ticker_json)
+                    .arg("EX")
+                    .arg(300) // 5 minutes TTL
+                    .query_async::<_, ()>(&mut conn)
+                    .await
+                {
+                    Ok(_) => {
+                        snapshot_count += 1;
+                        tracing::debug!("✅ Ticker snapshot saved: {}", key);
+                    }
+                    Err(e) => {
+                        tracing::error!("❌ Failed to save ticker snapshot {}: {}", key, e);
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!("❌ Failed to serialize ticker for {}: {}", market_id, e);
+            }
+        }
+    }
+    
+    tracing::info!("✅ Snapshot process completed: {} snapshots saved at {}", snapshot_count, timestamp);
+}
     
     // Helper methods...
     fn create_order_from_request(&self, req: crate::redis_manager::OrderRequest) -> Order {
@@ -563,6 +625,7 @@ impl TradingEngine {
         ).await;
         
         // Take snapshot if needed
+        tracing::info!("💾 Taking snapshots");
         self.operations_since_snapshot += 1;
         if self.operations_since_snapshot >= self.snapshot_interval {
             self.take_snapshots().await;

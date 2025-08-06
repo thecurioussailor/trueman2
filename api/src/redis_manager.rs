@@ -132,14 +132,14 @@ impl RedisManager {
         // Step 1: Subscribe to response channel BEFORE queuing
         // This prevents race conditions
         let response_channel = format!("engine_response:{}", request_id);
-        
+        println!("🔍 Subscribing to response channel: {}", response_channel);
         let subscribe_result = async {
             let conn = self.client.get_async_connection().await?;
             let mut pubsub = conn.into_pubsub();
             pubsub.subscribe(&response_channel).await?;
             Ok::<_, redis::RedisError>(pubsub)
         }.await;
-        
+        println!("🔍 Subscribed to response channel: {:?}", subscribe_result.is_ok());
         let mut pubsub = match subscribe_result {
             Ok(ps) => ps,
             Err(e) => return EngineProcessingResult::Error(format!("Failed to subscribe: {}", e)),

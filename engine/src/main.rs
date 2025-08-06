@@ -20,7 +20,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create TradingEngine instance
     let mut trading_engine = TradingEngine::new("redis://127.0.0.1:6379/").await?;
     info!("✅ TradingEngine initialized");
-    
+
+    if let Err(e) = trading_engine.load_balance_snapshots().await {
+        error!("Failed to load balance snapshots: {}", e);
+    } else {
+        info!("✅ Balance snapshots loaded successfully");
+    }
+
     let consumer_group = "matching_engine_group";
     let consumer_name = "engine_1";
     
@@ -29,6 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         match redis_manager.consume_messages(consumer_group, consumer_name, 10).await {
             Ok(messages) => {
+                println!("🔍 Received messages: {:?}", messages);
                 if !messages.is_empty() {
                     info!("📥 Received {} messages to process", messages.len());
                     
