@@ -4,6 +4,8 @@ use serde::{Serialize, Deserialize};
 use tokio::time::{interval, Duration};
 use redis::{aio::ConnectionManager, AsyncCommands, Commands}; 
 use chrono::Utc;
+use diesel::prelude::*;
+use database::{establish_connection, Market, Token, schema::{markets, tokens}};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Order {
@@ -34,6 +36,8 @@ pub struct Trade {
     pub market_id: Uuid,
     pub buyer_order_id: Uuid,
     pub seller_order_id: Uuid,
+    pub buyer_user_id: Uuid,
+    pub seller_user_id: Uuid,
     pub price: i64,
     pub quantity: i64,
     pub timestamp: i64,
@@ -94,11 +98,34 @@ pub struct OrderBookSnapshot {
     pub timestamp: i64,
 }
 
+// Add this enhanced MarketInfo struct near the top with other structs (around line 72)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketInfo {
+    pub id: Uuid,
+    pub symbol: String,
+    pub base_currency: TokenInfo,    // Full token info instead of just ID
+    pub quote_currency: TokenInfo,   // Full token info instead of just ID
+    pub min_order_size: i64,
+    pub tick_size: i64,
+    pub is_active: bool,
+    pub created_at: chrono::NaiveDateTime,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenInfo {
+    pub id: Uuid,
+    pub symbol: String,
+    pub name: String,
+    pub decimals: i32,
+    pub is_active: bool,
+}
+
 pub struct TradingEngine {
     // IN-MEMORY: Core trading data
     orderbooks: HashMap<Uuid, OrderBook>,
     balances: HashMap<Uuid, UserBalance>,
     tickers: HashMap<Uuid, MarketTicker>,
+    markets: HashMap<Uuid, MarketInfo>,
     
     // REDIS: Communication layer
     redis_manager: ConnectionManager,
@@ -117,6 +144,8 @@ impl TradingEngine {
             orderbooks: HashMap::new(),
             balances: HashMap::new(),
             tickers: HashMap::new(),
+            markets: HashMap::new(),
+
             redis_manager,
             operations_since_snapshot: 0,
             snapshot_interval: 10, // Snapshot every 10 operations
@@ -135,6 +164,7 @@ impl TradingEngine {
         
         // 1. Convert request to internal order
         let order = self.create_order_from_request(order_request.clone());
+        println!("Order: {:?}", order);
         
         // 2. Validate balances (now we have balance data!)
         if !self.validate_order_balance(&order) {
@@ -154,10 +184,11 @@ impl TradingEngine {
         
         // 3. Execute matching in memory
         let (updated_order, trades) = self.match_order(order).await;
+        println!("Trades: {:?}, Orders: {:?}", trades, updated_order);
         
-        // 4. Update in-memory state
-        self.update_balances_from_trades(&trades).await;
-        self.update_ticker_from_trades(&trades).await;
+        // // // 4. Update in-memory state
+        // self.update_balances_from_trades(&trades).await;
+        // self.update_ticker_from_trades(&trades).await;
         
         // 5. Queue database updates (async, non-blocking)
         self.queue_db_updates(&updated_order, &trades).await;
@@ -194,99 +225,444 @@ impl TradingEngine {
     
     /// Execute order matching against orderbook
     async fn match_order(&mut self, mut order: Order) -> (Order, Vec<Trade>) {
-        let mut trades = Vec::new();
-        let orderbook = self.orderbooks.entry(order.market_id).or_insert_with(|| OrderBook {
+        let market_info = match self.markets.get(&order.market_id).cloned() {
+            Some(market) => market,
+            None => {
+                tracing::error!("❌ Market not found: {}", order.market_id);
+                order.status = OrderStatus::Cancelled;
+                return (order, Vec::new());
+            }
+        };
+
+        tracing::info!("🔄 Matching {:?} {:?} order: {} {} @ {:?} in market {}", 
+            order.order_kind, 
+            order.order_type,
+            order.quantity, 
+            market_info.base_currency.symbol,
+            order.price, 
+            market_info.symbol
+       );
+
+        // Create or get orderbook - but don't hold the reference
+    if !self.orderbooks.contains_key(&order.market_id) {
+        tracing::info!("📚 Creating new orderbook for market {}", market_info.symbol);
+        self.orderbooks.insert(order.market_id, OrderBook {
             market_id: order.market_id,
             bids: BTreeMap::new(),
             asks: BTreeMap::new(),
             last_updated: Utc::now().timestamp_millis(),
         });
+    }
         
         // Simplified matching logic (you can make this more sophisticated)
-        match order.order_kind {
+        // Now execute the matching logic
+        let trades = match order.order_kind {
             OrderKind::Market => {
-                // Market orders: match immediately at best available prices
-                let (opposite_side, same_side) = match order.order_type {
-                    OrderType::Buy => (&mut orderbook.asks, &mut orderbook.bids),
-                    OrderType::Sell => (&mut orderbook.bids, &mut orderbook.asks),
-                };
-                
-                // Match against opposite side
-                let mut remaining_quantity = order.quantity;
-                let mut prices_to_remove = Vec::new();
-                
-                for (&price, order_queue) in opposite_side.iter_mut() {
-                    if remaining_quantity == 0 { break; }
-                    
-                    while let Some(mut matching_order) = order_queue.pop_front() {
-                        if remaining_quantity == 0 { break; }
-                        
-                        let trade_quantity = remaining_quantity.min(matching_order.quantity - matching_order.filled_quantity);
-                        
-                        // Create trade
-                        let trade = Trade {
-                            id: Uuid::new_v4(),
-                            market_id: order.market_id,
-                            buyer_order_id: if matches!(order.order_type, OrderType::Buy) { order.id } else { matching_order.id },
-                            seller_order_id: if matches!(order.order_type, OrderType::Sell) { order.id } else { matching_order.id },
-                            price,
-                            quantity: trade_quantity,
-                            timestamp: Utc::now().timestamp_millis(),
-                        };
-                        
-                        trades.push(trade);
-                        
-                        // Update orders
-                        order.filled_quantity += trade_quantity;
-                        matching_order.filled_quantity += trade_quantity;
-                        remaining_quantity -= trade_quantity;
-                        
-                        // Handle filled/partial fills
-                        if matching_order.filled_quantity < matching_order.quantity {
-                            order_queue.push_front(matching_order); // Put back if not fully filled
-                            break;
-                        }
-                    }
-                    
-                    if order_queue.is_empty() {
-                        prices_to_remove.push(price);
-                    }
-                }
-                
-                // Clean up empty price levels
-                for price in prices_to_remove {
-                    opposite_side.remove(&price);
-                }
-                
-                // Update order status
-                order.status = if order.filled_quantity == order.quantity {
-                    OrderStatus::Filled
-                } else if order.filled_quantity > 0 {
-                    OrderStatus::PartiallyFilled
-                } else {
-                    OrderStatus::Pending
-                };
+                self.execute_market_order(&mut order, &market_info).await
             }
             OrderKind::Limit => {
-                // Limit orders: try to match, then add to book if not fully filled
-                // Similar logic but add remaining quantity to orderbook
-                // Implementation similar to market order matching...
-                
-                // For now, simplified: add to orderbook
-                let price = order.price.unwrap();
-                let order_queue = match order.order_type {
-                    OrderType::Buy => orderbook.bids.entry(price).or_insert_with(VecDeque::new),
-                    OrderType::Sell => orderbook.asks.entry(price).or_insert_with(VecDeque::new),
-                };
-                order_queue.push_back(order.clone());
-                order.status = OrderStatus::Pending;
+                self.execute_limit_order(&mut order, &market_info).await
             }
+        };
+           
+        // Update balances based on trades
+        if !trades.is_empty() {
+            self.update_balances_from_trades(&trades, &market_info).await;
+            self.update_ticker_from_trades(&trades, &market_info).await;
         }
-        
-        orderbook.last_updated = Utc::now().timestamp_millis();
+
+        // Update orderbook timestamp
+        if let Some(orderbook) = self.orderbooks.get_mut(&order.market_id) {
+            orderbook.last_updated = Utc::now().timestamp_millis();
+        }
         (order, trades)
     }
     
+    async fn execute_market_order(&mut self, order: &mut Order, market_info: &MarketInfo) -> Vec<Trade> {
+        let mut trades = Vec::new();
+        let mut remaining_quantity = order.quantity;
+
+        // Get the orderbook
+        let orderbook = match self.orderbooks.get_mut(&order.market_id) {
+            Some(ob) => ob,
+            None => return trades, // Should not happen, but safe fallback
+        };
+
+        // Get the opposite side of the orderbook
+        let opposite_side = match order.order_type {
+            OrderType::Buy => &mut orderbook.asks,   // Buy orders match against asks (sellers)
+            OrderType::Sell => &mut orderbook.bids, // Sell orders match against bids (buyers)
+        };
+        // For market orders, we iterate through prices in the best order:
+        // - For buy orders: lowest ask prices first (ascending)
+        // - For sell orders: highest bid prices first (descending)
+        let mut prices_to_remove = Vec::new();
+
+        // BTreeMap is naturally sorted, but we need different iteration order
+        let price_levels: Vec<i64> = match order.order_type {
+            OrderType::Buy => opposite_side.keys().cloned().collect(), // Ascending (best asks first)
+            OrderType::Sell => opposite_side.keys().rev().cloned().collect(), // Descending (best bids first)
+        };
+        for price in price_levels {
+            if remaining_quantity == 0 { break; }
+    
+            if let Some(order_queue) = opposite_side.get_mut(&price) {
+                while let Some(mut matching_order) = order_queue.pop_front() {
+                    if remaining_quantity == 0 { break; }
+    
+                    let available_quantity = matching_order.quantity - matching_order.filled_quantity;
+                    let trade_quantity = remaining_quantity.min(available_quantity);
+                    println!("{:?}", trade_quantity);
+    
+                    // Create trade
+                    let trade = Trade {
+                        id: Uuid::new_v4(),
+                        market_id: order.market_id,
+                        buyer_order_id: if matches!(order.order_type, OrderType::Buy) { 
+                            order.id 
+                        } else { 
+                            matching_order.id 
+                        },
+                        seller_order_id: if matches!(order.order_type, OrderType::Sell) { 
+                            order.id 
+                        } else { 
+                            matching_order.id 
+                        },
+                        buyer_user_id: if matches!(order.order_type, OrderType::Buy) { 
+                            order.user_id 
+                        } else { 
+                            matching_order.user_id 
+                        },
+                        seller_user_id: if matches!(order.order_type, OrderType::Sell) { 
+                            order.user_id 
+                        } else { 
+                            matching_order.user_id 
+                        },
+                        price,
+                        quantity: trade_quantity, // This IS the quantity that was traded!
+                        timestamp: Utc::now().timestamp_millis(),
+                    };
+    
+                    trades.push(trade.clone());
+    
+                    // Update orders
+                    order.filled_quantity += trade_quantity;
+                    matching_order.filled_quantity += trade_quantity;
+                    remaining_quantity -= trade_quantity;
+    
+                    tracing::info!("✅ Trade executed: {} {} @ {} in {}", 
+                        trade_quantity, 
+                        market_info.base_currency.symbol, 
+                        price, 
+                        market_info.symbol
+                    );
+    
+                    // Update matching order status
+                    if matching_order.filled_quantity >= matching_order.quantity {
+                        matching_order.status = OrderStatus::Filled;
+                        // Don't put it back in the queue - it's fully filled
+                    } else {
+                        matching_order.status = OrderStatus::PartiallyFilled;
+                        order_queue.push_front(matching_order); // Put back partially filled order
+                        break; // This price level still has liquidity
+                    }
+                }
+    
+                if order_queue.is_empty() {
+                    prices_to_remove.push(price);
+                }
+            }
+        }
+
+        // Clean up empty price levels
+        for price in prices_to_remove {
+            opposite_side.remove(&price);
+        }
+        // Update order status
+        order.status = if order.filled_quantity >= order.quantity {
+            OrderStatus::Filled
+        } else if order.filled_quantity > 0 {
+            OrderStatus::PartiallyFilled
+        } else {
+            OrderStatus::Cancelled // Market order couldn't be filled
+        };
+
+        trades
+    }
+
+    /// Execute a limit order (try to match, then add remainder to orderbook)
+    async fn execute_limit_order(&mut self, order: &mut Order, market_info: &MarketInfo) -> Vec<Trade> {
+        println!("Executing limit order: {:?}", order);
+        let mut trades = Vec::new();
+        let order_price = order.price.expect("Limit order must have a price");
+        let mut remaining_quantity = order.quantity;
+
+        // Get the orderbook
+        let orderbook = match self.orderbooks.get_mut(&order.market_id) {
+            Some(ob) => ob,
+            None => return trades, // Should not happen, but safe fallback
+        };
+        println!("Orderbook: {:?}", orderbook);
+
+        // First, try to match against existing orders
+        let opposite_side = match order.order_type {
+            OrderType::Buy => &mut orderbook.asks,   // Buy orders match against asks
+            OrderType::Sell => &mut orderbook.bids, // Sell orders match against bids
+        };
+        println!("Opposite side: {:?}", opposite_side);
+        let mut prices_to_remove = Vec::new();
+
+        // Get prices that can match with this limit order
+        let matching_prices: Vec<i64> = match order.order_type {
+            OrderType::Buy => {
+                // Buy limit order matches with asks at or below the limit price
+                opposite_side.keys()
+                    .filter(|&&ask_price| ask_price <= order_price)
+                    .cloned()
+                    .collect()
+            }
+            OrderType::Sell => {
+                // Sell limit order matches with bids at or above the limit price
+                opposite_side.keys()
+                    .filter(|&&bid_price| bid_price >= order_price)
+                    .rev() // Start with highest bids
+                    .cloned()
+                    .collect()
+            }
+        };
+
+        // Execute matches
+        for price in matching_prices {
+            if remaining_quantity == 0 { break; }
+
+            if let Some(order_queue) = opposite_side.get_mut(&price) {
+                while let Some(mut matching_order) = order_queue.pop_front() {
+                    if remaining_quantity == 0 { break; }
+
+                    let available_quantity = matching_order.quantity - matching_order.filled_quantity;
+                    let trade_quantity = remaining_quantity.min(available_quantity);
+
+                    // Create trade at the maker's price (price improvement for taker)
+                    let trade = Trade {
+                        id: Uuid::new_v4(),
+                        market_id: order.market_id,
+                        buyer_order_id: if matches!(order.order_type, OrderType::Buy) { 
+                            order.id 
+                        } else { 
+                            matching_order.id 
+                        },
+                        seller_order_id: if matches!(order.order_type, OrderType::Sell) { 
+                            order.id 
+                        } else { 
+                            matching_order.id 
+                        },
+                        buyer_user_id: if matches!(order.order_type, OrderType::Buy) { 
+                            order.user_id 
+                        } else { 
+                            matching_order.user_id 
+                        },
+                        seller_user_id: if matches!(order.order_type, OrderType::Sell) { 
+                            order.user_id 
+                        } else { 
+                            matching_order.user_id 
+                        },
+                        price,
+                        quantity: trade_quantity, // This IS the quantity that was traded!
+                        timestamp: Utc::now().timestamp_millis(),
+                    };
+
+                    trades.push(trade.clone());
+
+                    // Update orders
+                    order.filled_quantity += trade_quantity;
+                    matching_order.filled_quantity += trade_quantity;
+                    remaining_quantity -= trade_quantity;
+
+                    tracing::info!("✅ Limit order trade: {} {} @ {} in {}", 
+                        trade_quantity, 
+                        market_info.base_currency.symbol, 
+                        price, 
+                        market_info.symbol
+                    );
+
+                    // Update matching order status
+                    if matching_order.filled_quantity >= matching_order.quantity {
+                        matching_order.status = OrderStatus::Filled;
+                    } else {
+                        matching_order.status = OrderStatus::PartiallyFilled;
+                        order_queue.push_front(matching_order);
+                        break;
+                    }
+                }
+
+                if order_queue.is_empty() {
+                    prices_to_remove.push(price);
+                }
+            }
+        }
+
+        // Clean up empty price levels
+        for price in prices_to_remove {
+            opposite_side.remove(&price);
+        }
+
+        // Add remaining quantity to the orderbook if not fully filled
+        if remaining_quantity > 0 {
+            let same_side = match order.order_type {
+                OrderType::Buy => &mut orderbook.bids,
+                OrderType::Sell => &mut orderbook.asks,
+            };
+
+            // Create a new order for the remaining quantity
+            let mut remaining_order = order.clone();
+            remaining_order.quantity = remaining_quantity;
+            remaining_order.filled_quantity = 0;
+            remaining_order.status = OrderStatus::Pending;
+
+            let price_level = same_side.entry(order_price).or_insert_with(VecDeque::new);
+            price_level.push_back(remaining_order);
+
+            tracing::info!("📋 Added {} {} to {} orderbook at price {} in {}", 
+                remaining_quantity, 
+                market_info.base_currency.symbol,
+                if matches!(order.order_type, OrderType::Buy) { "bid" } else { "ask" },
+                order_price,
+                market_info.symbol
+            );
+        }
+
+        // Update order status
+        order.status = if order.filled_quantity >= order.quantity {
+            OrderStatus::Filled
+        } else if order.filled_quantity > 0 {
+            OrderStatus::PartiallyFilled
+        } else {
+            OrderStatus::Pending
+        };
+
+        trades
+    }
+    
+    /// Update user balances based on executed trades
+    async fn update_balances_from_trades(&mut self, trades: &[Trade], market_info: &MarketInfo) {
+        for trade in trades {
+
+            let buyer_id = trade.buyer_user_id;  // Now using User ID
+            let seller_id = trade.seller_user_id; 
+
+                self.update_user_balance(
+                    buyer_id, 
+                    market_info.quote_currency.id, 
+                    -(trade.price * trade.quantity), // Decrease USDC
+                    0
+                ).await;
+                
+                self.update_user_balance(
+                    buyer_id, 
+                    market_info.base_currency.id, 
+                    trade.quantity, // Increase SOL/BTC/ETH
+                    0
+                ).await;
+
+                // Update seller balance: increase quote currency, decrease base currency
+                self.update_user_balance(
+                    seller_id, 
+                    market_info.quote_currency.id, 
+                    trade.price * trade.quantity, // Increase USDC
+                    0
+                ).await;
+                
+                self.update_user_balance(
+                    seller_id, 
+                    market_info.base_currency.id, 
+                    -trade.quantity, // Decrease SOL/BTC/ETH
+                    0
+                ).await;
+
+                tracing::info!("💰 Updated balances for trade: {} {} @ {} between users {} and {}", 
+                    trade.quantity, 
+                    market_info.base_currency.symbol, 
+                    trade.price,
+                    buyer_id,
+                    seller_id
+                );
+            }
+        }
+
+    /// Update individual user balance
+    async fn update_user_balance(&mut self, user_id: Uuid, token_id: Uuid, amount_delta: i64, locked_delta: i64) {
+        let user_balance = self.balances.entry(user_id).or_insert_with(|| UserBalance {
+            user_id,
+            token_balances: HashMap::new(),
+        });
+
+        let token_balance = user_balance.token_balances.entry(token_id).or_insert_with(|| TokenBalance {
+            available: 0,
+            locked: 0,
+        });
+
+        token_balance.available += amount_delta;
+        token_balance.locked += locked_delta;
+
+        // Queue balance update for database
+        let balance_event = DBUpdateEvent::BalanceUpdated {
+            user_id,
+            token_id,
+            available: token_balance.available,
+            locked: token_balance.locked,
+        };
+
+        // Send to db-updater queue
+        let mut conn = self.redis_manager.clone();
+        let _: Result<String, _> = redis::cmd("XADD")
+            .arg("db_update_queue")
+            .arg("*")
+            .arg("type")
+            .arg("balance_updated")
+            .arg("data")
+            .arg(serde_json::to_string(&balance_event).unwrap())
+            .query_async(&mut conn)
+            .await;
+}
+    /// Update market ticker from trades
+    async fn update_ticker_from_trades(&mut self, trades: &[Trade], market_info: &MarketInfo) {
+        if trades.is_empty() { return; }
+
+        let ticker = self.tickers.entry(trades[0].market_id).or_insert_with(|| MarketTicker {
+            market_id: trades[0].market_id,
+            last_price: 0,
+            volume_24h: 0,
+            high_24h: 0,
+            low_24h: 0,
+            change_24h: 0.0,
+            timestamp: Utc::now().timestamp_millis(),
+        });
+
+        // Update with latest trade price
+        if let Some(last_trade) = trades.last() {
+            ticker.last_price = last_trade.price;
+            ticker.timestamp = last_trade.timestamp;
+            
+            // Update high/low (simplified - in production you'd track 24h period)
+            if ticker.high_24h == 0 || last_trade.price > ticker.high_24h {
+                ticker.high_24h = last_trade.price;
+            }
+            if ticker.low_24h == 0 || last_trade.price < ticker.low_24h {
+                ticker.low_24h = last_trade.price;
+            }
+
+            // Add volume
+            for trade in trades {
+                ticker.volume_24h += trade.quantity;
+            }
+
+            tracing::info!("📊 Updated ticker for {}: last_price={}, volume_24h={}", 
+                market_info.symbol, 
+                ticker.last_price, 
+                ticker.volume_24h
+            );
+        }
+    }
     /// Queue updates for db-updater service
     async fn queue_db_updates(&mut self, order: &Order, trades: &[Trade]) {
         let mut conn = self.redis_manager.clone();
@@ -361,7 +737,7 @@ impl TradingEngine {
     }
     
     /// Take periodic snapshots for recovery
-async fn take_snapshots(&mut self) {
+    async fn take_snapshots(&mut self) {
     tracing::info!("💾 Starting snapshot process...");
     tracing::info!("📊 Current state: {} balances, {} orderbooks, {} tickers", 
         self.balances.len(), 
@@ -455,16 +831,16 @@ async fn take_snapshots(&mut self) {
                     Err(e) => {
                         tracing::error!("❌ Failed to save ticker snapshot {}: {}", key, e);
                     }
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("❌ Failed to serialize ticker for {}: {}", market_id, e);
                 }
             }
-            Err(e) => {
-                tracing::error!("❌ Failed to serialize ticker for {}: {}", market_id, e);
-            }
         }
-    }
     
-    tracing::info!("✅ Snapshot process completed: {} snapshots saved at {}", snapshot_count, timestamp);
-}
+        tracing::info!("✅ Snapshot process completed: {} snapshots saved at {}", snapshot_count, timestamp);
+    }
     
     // Helper methods...
     fn create_order_from_request(&self, req: crate::redis_manager::OrderRequest) -> Order {
@@ -479,60 +855,6 @@ async fn take_snapshots(&mut self) {
             filled_quantity: 0,
             status: OrderStatus::Pending,
             created_at: req.timestamp,
-        }
-    }
-    
-    /// Enhanced balance validation (now actually checks in-memory balances)
-    fn validate_order_balance(&self, order: &Order) -> bool {
-        if let Some(user_balance) = self.balances.get(&order.user_id) {
-            // For now, simplified validation
-            // In real implementation, you'd:
-            // 1. Get the market's base/quote tokens
-            // 2. Calculate required balance based on order type
-            // 3. Check if user has sufficient available balance
-            
-            // Simplified: assume we're checking if user has any balance
-            return !user_balance.token_balances.is_empty();
-        }
-        
-        // No balance found for user
-        false
-    }
-    
-    /// Update balances based on executed trades
-    async fn update_balances_from_trades(&mut self, trades: &[Trade]) {
-        for trade in trades {
-            // Update buyer balance (reduce quote token, increase base token)
-            // Update seller balance (reduce base token, increase quote token)
-            // For now, this is simplified - you'd need market token pair info
-            
-            tracing::debug!("Updating balances for trade: {} @ {}", trade.quantity, trade.price);
-            // TODO: Implement actual balance updates based on your token pair logic
-        }
-    }
-    
-    async fn update_ticker_from_trades(&mut self, trades: &[Trade]) {
-        for trade in trades {
-            let ticker = self.tickers.entry(trade.market_id).or_insert_with(|| MarketTicker {
-                market_id: trade.market_id,
-                last_price: trade.price,
-                volume_24h: 0,
-                high_24h: trade.price,
-                low_24h: trade.price,
-                change_24h: 0.0,
-                timestamp: trade.timestamp,
-            });
-            
-            ticker.last_price = trade.price;
-            ticker.volume_24h += trade.quantity;
-            ticker.timestamp = trade.timestamp;
-            
-            if trade.price > ticker.high_24h {
-                ticker.high_24h = trade.price;
-            }
-            if trade.price < ticker.low_24h {
-                ticker.low_24h = trade.price;
-            }
         }
     }
     
@@ -807,4 +1129,210 @@ async fn take_snapshots(&mut self) {
         Ok(())
     }
 
+     // Add this method to load markets from database
+    pub async fn load_markets(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        
+        
+        let mut connection = establish_connection();
+        
+        // Load all active markets
+        let markets_result = markets::table
+            .filter(markets::is_active.eq(true))
+            .select(Market::as_select())
+            .load::<Market>(&mut connection)?;
+        
+        tracing::info!("📊 Loading {} active markets from database...", markets_result.len());
+        
+        for market in markets_result {
+            // Get base token - following your exact pattern
+            let base_token = match tokens::table
+                .filter(tokens::id.eq(market.base_currency_id))
+                .filter(tokens::is_active.eq(true))
+                .first::<Token>(&mut connection) {
+                Ok(token) => TokenInfo {
+                    id: token.id,
+                    symbol: token.symbol,
+                    name: token.name,
+                    decimals: token.decimals,
+                    is_active: token.is_active,
+                },
+                Err(_) => {
+                    tracing::warn!("⚠️  Skipping market {} - base token not found or inactive", market.symbol);
+                    continue;
+                }
+            };
+
+            // Get quote token - following your exact pattern
+            let quote_token = match tokens::table
+                .filter(tokens::id.eq(market.quote_currency_id))
+                .filter(tokens::is_active.eq(true))
+                .first::<Token>(&mut connection) {
+                Ok(token) => TokenInfo {
+                    id: token.id,
+                    symbol: token.symbol,
+                    name: token.name,
+                    decimals: token.decimals,
+                    is_active: token.is_active,
+                },
+                Err(_) => {
+                    tracing::warn!("⚠️  Skipping market {} - quote token not found or inactive", market.symbol);
+                    continue;
+                }
+            };
+
+            // Create MarketInfo with full token details
+            let market_info = MarketInfo {
+                id: market.id,
+                symbol: market.symbol.clone(),
+                base_currency: base_token,
+                quote_currency: quote_token,
+                min_order_size: market.min_order_size,
+                tick_size: market.tick_size,
+                is_active: market.is_active,
+                created_at: market.created_at,
+            };
+            
+            self.markets.insert(market.id, market_info.clone());
+            tracing::info!("📈 Loaded market: {} ({}/{}) - ID: {}", 
+                market.symbol, 
+                market_info.base_currency.symbol, 
+                market_info.quote_currency.symbol,
+                market.id
+            );
+        }
+        
+        tracing::info!("✅ Successfully loaded {} markets with token details", self.markets.len());
+        Ok(())
+    }
+
+    // Enhanced balance validation with token symbols for better logging
+    fn validate_order_balance(&self, order: &Order) -> bool {
+        // Get market information
+        let market = match self.markets.get(&order.market_id) {
+            Some(market) => market,
+            None => {
+                tracing::error!("❌ Market not found: {}", order.market_id);
+                return false;
+            }
+        };
+        
+        // Get user balance
+        let user_balance = match self.balances.get(&order.user_id) {
+            Some(balance) => balance,
+            None => {
+                tracing::warn!("❌ No balance found for user: {} in market {}", 
+                    order.user_id, market.symbol);
+                return false;
+            }
+        };
+        
+        match order.order_type {
+            OrderType::Buy => {
+                // For buy orders, user needs sufficient quote currency (usually USDC)
+                let required_token_id = market.quote_currency.id;
+                let required_amount = match order.price {
+                    Some(price) => price * order.quantity,
+                    None => {
+                        // Market order - estimate against current best ask price
+                        let estimated_price = self.estimate_market_buy_price(order.market_id, order.quantity);
+                        match estimated_price {
+                            Some(price) => price * order.quantity,
+                            None => {
+                                tracing::warn!("❌ No liquidity available for market buy in {} market", 
+                                    market.symbol);
+                                return false;
+                            }
+                        }
+                    }
+                };
+                
+                if let Some(token_balance) = user_balance.token_balances.get(&required_token_id) {
+                    let has_sufficient = token_balance.available >= required_amount;
+                    if !has_sufficient {
+                        tracing::warn!(
+                            "❌ Insufficient {} balance for BUY order in {} market. Required: {}, Available: {}", 
+                            market.quote_currency.symbol,
+                            market.symbol,
+                            required_amount, 
+                            token_balance.available
+                        );
+                    } else {
+                        tracing::info!(
+                            "✅ Sufficient {} balance for BUY order in {} market. Required: {}, Available: {}", 
+                            market.quote_currency.symbol,
+                            market.symbol,
+                            required_amount, 
+                            token_balance.available
+                        );
+                    }
+                    has_sufficient
+                } else {
+                    tracing::warn!("❌ No {} balance found for user in {} market", 
+                        market.quote_currency.symbol, market.symbol);
+                    false
+                }
+            }
+            OrderType::Sell => {
+                // For sell orders, user needs sufficient base currency (SOL/BTC/ETH)
+                let required_token_id = market.base_currency.id;
+                let required_amount = order.quantity;
+                
+                if let Some(token_balance) = user_balance.token_balances.get(&required_token_id) {
+                    let has_sufficient = token_balance.available >= required_amount;
+                    if !has_sufficient {
+                        tracing::warn!(
+                            "❌ Insufficient {} balance for SELL order in {} market. Required: {}, Available: {}", 
+                            market.base_currency.symbol,
+                            market.symbol,
+                            required_amount, 
+                            token_balance.available
+                        );
+                    } else {
+                        tracing::info!(
+                            "✅ Sufficient {} balance for SELL order in {} market. Required: {}, Available: {}", 
+                            market.base_currency.symbol,
+                            market.symbol,
+                            required_amount, 
+                            token_balance.available
+                        );
+                    }
+                    has_sufficient
+                } else {
+                    tracing::warn!("❌ No {} balance found for user in {} market", 
+                        market.base_currency.symbol, market.symbol);
+                    false
+                }
+            }
+        }
+    }
+    fn estimate_market_buy_price(&self, market_id: Uuid, quantity: i64) -> Option<i64> {
+        let orderbook = self.orderbooks.get(&market_id)?;
+        let mut remaining_quantity = quantity;
+        let mut total_cost = 0i64;
+        
+        // Calculate cost by walking through asks (ascending price order)
+        for (&price, orders) in &orderbook.asks {
+            if remaining_quantity <= 0 { break; }
+            
+            let available_at_price: i64 = orders.iter()
+                .map(|o| o.quantity - o.filled_quantity)
+                .sum();
+            
+            let quantity_to_buy = remaining_quantity.min(available_at_price);
+            total_cost += price * quantity_to_buy;
+            remaining_quantity -= quantity_to_buy;
+        }
+        
+        if remaining_quantity > 0 {
+            // Not enough liquidity - return conservative estimate using highest price found
+            if let Some((&highest_price, _)) = orderbook.asks.iter().last() {
+                Some(highest_price + (highest_price / 10)) // Add 10% buffer
+            } else {
+                None // No asks available
+            }
+        } else {
+            // We can fulfill the order - return average price
+            Some(total_cost / quantity)
+        }
+    }
 }

@@ -21,6 +21,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut trading_engine = TradingEngine::new("redis://127.0.0.1:6379/").await?;
     info!("✅ TradingEngine initialized");
 
+      // Load markets from database
+    if let Err(e) = trading_engine.load_markets().await {
+        error!("Failed to load markets: {}", e);
+        return Err(e);
+    } else {
+        info!("✅ Markets loaded successfully");
+    }
+
     if let Err(e) = trading_engine.load_balance_snapshots().await {
         error!("Failed to load balance snapshots: {}", e);
     } else {

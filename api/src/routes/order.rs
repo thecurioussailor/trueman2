@@ -39,6 +39,7 @@ pub async fn create_order(req: HttpRequest, body: Json<CreateOrderRequest>) -> i
     };
 
     let body = body.into_inner();
+    println!("Creating order: {:?}", body);
 
     // Create order request
     let order_request = OrderRequest {
@@ -51,7 +52,7 @@ pub async fn create_order(req: HttpRequest, body: Json<CreateOrderRequest>) -> i
         quantity: body.quantity,
         timestamp: Utc::now().timestamp_millis(),
     };
-
+    
     // Send to engine and wait for response
     let redis_manager = get_redis_manager().await;
     

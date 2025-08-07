@@ -38,6 +38,34 @@ struct OrderUpdateData {
     pub status: String,
 }
 
+// Add these structs to match engine's Order and Trade
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct EngineOrder {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub market_id: Uuid,
+    pub order_type: String, // Will be "Buy" or "Sell"
+    pub order_kind: String, // Will be "Market" or "Limit"  
+    pub price: Option<i64>,
+    pub quantity: i64,
+    pub filled_quantity: i64,
+    pub status: String, // Will be "Pending", "PartiallyFilled", etc.
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct EngineTradeData {
+    pub id: Uuid,
+    pub market_id: Uuid,
+    pub buyer_order_id: Uuid,
+    pub seller_order_id: Uuid,
+    pub buyer_user_id: Uuid,    // Add this field
+    pub seller_user_id: Uuid,   // Add this field
+    pub price: i64,
+    pub quantity: i64,
+    pub timestamp: i64,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct TradeData {
     pub id: Uuid,
