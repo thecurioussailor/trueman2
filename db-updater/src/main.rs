@@ -3,13 +3,15 @@ use serde::{Deserialize, Serialize};
 use diesel::prelude::*;
 use database::{establish_connection, schema, NewOrder, NewTrade, Order, Trade, Balance};
 use uuid::Uuid;
+use std::collections::HashMap;
 
+// This enum MUST match exactly what the engine sends
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", content = "data")]
 enum DBUpdateEvent {
-    OrderCreated(OrderData),
-    OrderUpdated(OrderUpdateData), 
-    TradeExecuted(TradeData),
+    OrderCreated(EngineOrder),
+    OrderUpdated(EngineOrder),      // Engine sends full Order struct
+    TradeExecuted(EngineTrade),     // Engine sends full Trade struct
     BalanceUpdated { 
         user_id: Uuid, 
         token_id: Uuid, 
@@ -18,63 +20,50 @@ enum DBUpdateEvent {
     },
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-struct OrderData {
-    pub id: Uuid,
-    pub user_id: Uuid,
-    pub market_id: Uuid,
-    pub order_type: String,
-    pub order_kind: String,
-    pub price: Option<i64>,
-    pub quantity: i64,
-    pub filled_quantity: i64,
-    pub status: String,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-struct OrderUpdateData {
-    pub id: Uuid,
-    pub filled_quantity: i64,
-    pub status: String,
-}
-
-// Add these structs to match engine's Order and Trade
+// These structs match exactly what the engine sends
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct EngineOrder {
     pub id: Uuid,
     pub user_id: Uuid,
     pub market_id: Uuid,
-    pub order_type: String, // Will be "Buy" or "Sell"
-    pub order_kind: String, // Will be "Market" or "Limit"  
+    pub order_type: EngineOrderType,
+    pub order_kind: EngineOrderKind,
     pub price: Option<i64>,
     pub quantity: i64,
     pub filled_quantity: i64,
-    pub status: String, // Will be "Pending", "PartiallyFilled", etc.
+    pub status: EngineOrderStatus,
     pub created_at: i64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-struct EngineTradeData {
+struct EngineTrade {
     pub id: Uuid,
     pub market_id: Uuid,
     pub buyer_order_id: Uuid,
     pub seller_order_id: Uuid,
-    pub buyer_user_id: Uuid,    // Add this field
-    pub seller_user_id: Uuid,   // Add this field
+    pub buyer_user_id: Uuid,
+    pub seller_user_id: Uuid,
     pub price: i64,
     pub quantity: i64,
     pub timestamp: i64,
 }
 
+// These enums match exactly what the engine sends
 #[derive(Debug, Clone, Deserialize, Serialize)]
-struct TradeData {
-    pub id: Uuid,
-    pub market_id: Uuid,
-    pub buyer_order_id: Uuid,
-    pub seller_order_id: Uuid,
-    pub price: i64,
-    pub quantity: i64,
+enum EngineOrderType { Buy, Sell }
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+enum EngineOrderKind { Market, Limit }
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+enum EngineOrderStatus { Pending, PartiallyFilled, Filled, Cancelled }
+
+#[derive(Debug, Clone)]
+struct PendingUpdate {
+    stream_id: String,
+    event: DBUpdateEvent,
 }
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
@@ -87,7 +76,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let consumer_group = "db_updater_group";
     let consumer_name = "db_updater_1";
     
-    // Create consumer group
+    // Create consumer group (ignore error if already exists)
     let _: Result<String, _> = redis::cmd("XGROUP")
         .arg("CREATE")
         .arg("db_update_queue")
@@ -106,7 +95,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .arg(consumer_group)
             .arg(consumer_name)
             .arg("COUNT")
-            .arg(10)
+            .arg(20) // Process more messages at once for better batching
             .arg("BLOCK")
             .arg(1000)
             .arg("STREAMS")
@@ -115,28 +104,120 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .query_async(&mut conn)
             .await?;
         
-        // Process updates
+        // Process updates with dependency ordering
         if let Some(updates) = parse_db_updates(results) {
-            for (stream_id, update) in updates {
-                match process_db_update(update, &mut db_conn).await {
-                    Ok(_) => {
-                        // Acknowledge successful processing
-                        let _: () = redis::cmd("XACK")
-                            .arg("db_update_queue")
-                            .arg(consumer_group)
-                            .arg(&stream_id)
-                            .query_async(&mut conn)
-                            .await?;
-                        
-                        tracing::info!("✅ Processed and acknowledged: {}", stream_id);
-                    }
-                    Err(e) => {
-                        tracing::error!("❌ Failed to process DB update {}: {}", stream_id, e);
-                        // Message will remain in pending list and can be retried
+            tracing::info!("📥 Received {} updates", updates.len());
+            
+            // Group and order updates
+            let ordered_updates = order_updates_by_dependencies(updates);
+            
+            // Process in dependency order within a transaction
+            db_conn.transaction::<_, Box<dyn std::error::Error>, _>(|tx_conn| {
+                let mut processed_stream_ids = Vec::new();
+                
+                // Process orders first (they are dependencies for trades)
+                for update in &ordered_updates.orders {
+                    match process_db_update(update.event.clone(), tx_conn) {
+                        Ok(_) => {
+                            processed_stream_ids.push(update.stream_id.clone());
+                            tracing::info!("✅ Processed order update: {}", update.stream_id);
+                        }
+                        Err(e) => {
+                            tracing::error!("❌ Failed to process order update {}: {}", update.stream_id, e);
+                            return Err(e);
+                        }
                     }
                 }
+                
+                // Then process trades (they depend on orders)
+                for update in &ordered_updates.trades {
+                    match process_db_update(update.event.clone(), tx_conn) {
+                        Ok(_) => {
+                            processed_stream_ids.push(update.stream_id.clone());
+                            tracing::info!("✅ Processed trade update: {}", update.stream_id);
+                        }
+                        Err(e) => {
+                            tracing::error!("❌ Failed to process trade update {}: {}", update.stream_id, e);
+                            return Err(e);
+                        }
+                    }
+                }
+                
+                // Finally process balances (they can be processed independently)
+                for update in &ordered_updates.balances {
+                    match process_db_update(update.event.clone(), tx_conn) {
+                        Ok(_) => {
+                            processed_stream_ids.push(update.stream_id.clone());
+                            tracing::info!("✅ Processed balance update: {}", update.stream_id);
+                        }
+                        Err(e) => {
+                            tracing::error!("❌ Failed to process balance update {}: {}", update.stream_id, e);
+                            return Err(e);
+                        }
+                    }
+                }
+                
+                Ok(processed_stream_ids)
+            })?;
+            
+            // Acknowledge all successfully processed messages
+            for stream_id in &ordered_updates.all_stream_ids {
+                let _: () = redis::cmd("XACK")
+                    .arg("db_update_queue")
+                    .arg(consumer_group)
+                    .arg(stream_id)
+                    .query_async(&mut conn)
+                    .await?;
+                
+                tracing::debug!("✅ Acknowledged: {}", stream_id);
+            }
+            
+            tracing::info!("✅ Batch processed {} updates successfully", ordered_updates.all_stream_ids.len());
+        } else {
+            tracing::debug!("No new messages");
+        }
+    }
+}
+
+#[derive(Debug)]
+struct OrderedUpdates {
+    orders: Vec<PendingUpdate>,
+    trades: Vec<PendingUpdate>,
+    balances: Vec<PendingUpdate>,
+    all_stream_ids: Vec<String>,
+}
+
+/// Order updates by dependencies: orders first, then trades, then balances
+fn order_updates_by_dependencies(updates: Vec<(String, DBUpdateEvent)>) -> OrderedUpdates {
+    let mut orders = Vec::new();
+    let mut trades = Vec::new();
+    let mut balances = Vec::new();
+    let mut all_stream_ids = Vec::new();
+    
+    for (stream_id, event) in updates {
+        all_stream_ids.push(stream_id.clone());
+        
+        match &event {
+            DBUpdateEvent::OrderCreated(_) | DBUpdateEvent::OrderUpdated(_) => {
+                orders.push(PendingUpdate { stream_id, event });
+            }
+            DBUpdateEvent::TradeExecuted(_) => {
+                trades.push(PendingUpdate { stream_id, event });
+            }
+            DBUpdateEvent::BalanceUpdated { .. } => {
+                balances.push(PendingUpdate { stream_id, event });
             }
         }
+    }
+    
+    tracing::info!("📋 Ordered updates: {} orders, {} trades, {} balances", 
+        orders.len(), trades.len(), balances.len());
+    
+    OrderedUpdates {
+        orders,
+        trades,
+        balances,
+        all_stream_ids,
     }
 }
 
@@ -163,6 +244,8 @@ fn parse_db_updates(results: Value) -> Option<Vec<(String, DBUpdateEvent)>> {
                                         if let Value::Bulk(fields) = &msg_data[1] {
                                             if let Some(update) = parse_message_fields(fields) {
                                                 updates.push((stream_id, update));
+                                            } else {
+                                                tracing::warn!("Failed to parse message fields for {}", stream_id);
                                             }
                                         }
                                     }
@@ -175,7 +258,10 @@ fn parse_db_updates(results: Value) -> Option<Vec<(String, DBUpdateEvent)>> {
             
             if updates.is_empty() { None } else { Some(updates) }
         }
-        _ => None,
+        _ => {
+            tracing::debug!("No stream data received");
+            None
+        }
     }
 }
 
@@ -202,22 +288,36 @@ fn parse_message_fields(fields: &[Value]) -> Option<DBUpdateEvent> {
     let event_type = field_map.get("type")?;
     let data_json = field_map.get("data")?;
     
+    tracing::debug!("Parsing event type: {}", event_type);
+    
     // Parse based on event type
     match event_type.as_str() {
         "order_created" => {
-            serde_json::from_str::<OrderData>(data_json)
-                .ok()
-                .map(DBUpdateEvent::OrderCreated)
+            match serde_json::from_str::<EngineOrder>(data_json) {
+                Ok(order) => Some(DBUpdateEvent::OrderCreated(order)),
+                Err(e) => {
+                    tracing::error!("Failed to parse order_created: {}", e);
+                    None
+                }
+            }
         }
         "order_updated" => {
-            serde_json::from_str::<OrderUpdateData>(data_json)
-                .ok()
-                .map(DBUpdateEvent::OrderUpdated)
+            match serde_json::from_str::<EngineOrder>(data_json) {
+                Ok(order) => Some(DBUpdateEvent::OrderUpdated(order)),
+                Err(e) => {
+                    tracing::error!("Failed to parse order_updated: {}", e);
+                    None
+                }
+            }
         }
         "trade_executed" => {
-            serde_json::from_str::<TradeData>(data_json)
-                .ok()
-                .map(DBUpdateEvent::TradeExecuted)
+            match serde_json::from_str::<EngineTrade>(data_json) {
+                Ok(trade) => Some(DBUpdateEvent::TradeExecuted(trade)),
+                Err(e) => {
+                    tracing::error!("Failed to parse trade_executed: {}", e);
+                    None
+                }
+            }
         }
         "balance_updated" => {
             #[derive(Deserialize)]
@@ -228,14 +328,18 @@ fn parse_message_fields(fields: &[Value]) -> Option<DBUpdateEvent> {
                 locked: i64,
             }
             
-            serde_json::from_str::<BalanceUpdateData>(data_json)
-                .ok()
-                .map(|data| DBUpdateEvent::BalanceUpdated {
+            match serde_json::from_str::<BalanceUpdateData>(data_json) {
+                Ok(data) => Some(DBUpdateEvent::BalanceUpdated {
                     user_id: data.user_id,
                     token_id: data.token_id,
                     available: data.available,
                     locked: data.locked,
-                })
+                }),
+                Err(e) => {
+                    tracing::error!("Failed to parse balance_updated: {}", e);
+                    None
+                }
+            }
         }
         _ => {
             tracing::warn!("Unknown event type: {}", event_type);
@@ -245,7 +349,7 @@ fn parse_message_fields(fields: &[Value]) -> Option<DBUpdateEvent> {
 }
 
 /// Process database update event
-async fn process_db_update(
+fn process_db_update(
     update: DBUpdateEvent, 
     db_conn: &mut PgConnection
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -259,33 +363,83 @@ async fn process_db_update(
             let new_order = NewOrder {
                 user_id: order_data.user_id,
                 market_id: order_data.market_id,
-                order_type: order_data.order_type,
-                order_kind: order_data.order_kind,
+                order_type: match order_data.order_type {
+                    EngineOrderType::Buy => "Buy".to_string(),
+                    EngineOrderType::Sell => "Sell".to_string(),
+                },
+                order_kind: match order_data.order_kind {
+                    EngineOrderKind::Market => "Market".to_string(),
+                    EngineOrderKind::Limit => "Limit".to_string(),
+                },
                 price: order_data.price,
                 quantity: order_data.quantity,
                 filled_quantity: Some(order_data.filled_quantity),
-                status: Some(order_data.status),
+                status: Some(match order_data.status {
+                    EngineOrderStatus::Pending => "Pending".to_string(),
+                    EngineOrderStatus::PartiallyFilled => "PartiallyFilled".to_string(),
+                    EngineOrderStatus::Filled => "Filled".to_string(),
+                    EngineOrderStatus::Cancelled => "Cancelled".to_string(),
+                }),
             };
             
+            // Use INSERT ON CONFLICT for idempotency
             diesel::insert_into(orders::table)
                 .values(&new_order)
+                .on_conflict(orders::id)
+                .do_nothing()
                 .execute(db_conn)?;
                 
-            tracing::info!("✅ Order {} created successfully", order_data.id);
+            tracing::debug!("✅ Order {} created successfully", order_data.id);
         }
         
-        DBUpdateEvent::OrderUpdated(order_update) => {
-            tracing::info!("💾 Updating order {} in database", order_update.id);
+        DBUpdateEvent::OrderUpdated(order_data) => {
+            tracing::info!("💾 Updating order {} in database", order_data.id);
             
-            diesel::update(orders::table.find(order_update.id))
+            let status_str = match order_data.status {
+                EngineOrderStatus::Pending => "Pending",
+                EngineOrderStatus::PartiallyFilled => "PartiallyFilled",
+                EngineOrderStatus::Filled => "Filled",
+                EngineOrderStatus::Cancelled => "Cancelled",
+            };
+            
+            // First try to update existing order
+            let updated_rows = diesel::update(orders::table.find(order_data.id))
                 .set((
-                    orders::filled_quantity.eq(order_update.filled_quantity),
-                    orders::status.eq(order_update.status),
+                    orders::filled_quantity.eq(order_data.filled_quantity),
+                    orders::status.eq(status_str),
                     orders::updated_at.eq(diesel::dsl::now),
                 ))
                 .execute(db_conn)?;
                 
-            tracing::info!("✅ Order {} updated successfully", order_update.id);
+            // If no rows were updated, the order doesn't exist yet - create it
+            if updated_rows == 0 {
+                tracing::warn!("Order {} not found for update, creating it", order_data.id);
+                
+                let new_order = NewOrder {
+                    user_id: order_data.user_id,
+                    market_id: order_data.market_id,
+                    order_type: match order_data.order_type {
+                        EngineOrderType::Buy => "Buy".to_string(),
+                        EngineOrderType::Sell => "Sell".to_string(),
+                    },
+                    order_kind: match order_data.order_kind {
+                        EngineOrderKind::Market => "Market".to_string(),
+                        EngineOrderKind::Limit => "Limit".to_string(),
+                    },
+                    price: order_data.price,
+                    quantity: order_data.quantity,
+                    filled_quantity: Some(order_data.filled_quantity),
+                    status: Some(status_str.to_string()),
+                };
+                
+                diesel::insert_into(orders::table)
+                    .values(&new_order)
+                    .on_conflict(orders::id)
+                    .do_nothing()
+                    .execute(db_conn)?;
+            }
+                
+            tracing::debug!("✅ Order {} updated successfully", order_data.id);
         }
         
         DBUpdateEvent::TradeExecuted(trade_data) => {
@@ -299,11 +453,14 @@ async fn process_db_update(
                 quantity: trade_data.quantity,
             };
             
+            // Use INSERT ON CONFLICT for idempotency
             diesel::insert_into(trades::table)
                 .values(&new_trade)
+                .on_conflict(trades::id)
+                .do_nothing()
                 .execute(db_conn)?;
                 
-            tracing::info!("✅ Trade {} created successfully", trade_data.id);
+            tracing::debug!("✅ Trade {} created successfully", trade_data.id);
         }
         
         DBUpdateEvent::BalanceUpdated { user_id, token_id, available, locked } => {
@@ -335,11 +492,18 @@ async fn process_db_update(
                 
                 diesel::insert_into(balances::table)
                     .values(&new_balance)
+                    .on_conflict((balances::user_id, balances::token_id))
+                    .do_update()
+                    .set((
+                        balances::amount.eq(available),
+                        balances::locked_amount.eq(locked),
+                        balances::updated_at.eq(diesel::dsl::now),
+                    ))
                     .execute(db_conn)?;
                     
-                tracing::info!("✅ New balance created for user {} token {}", user_id, token_id);
+                tracing::debug!("✅ Balance upserted for user {} token {}", user_id, token_id);
             } else {
-                tracing::info!("✅ Balance updated for user {} token {}", user_id, token_id);
+                tracing::debug!("✅ Balance updated for user {} token {}", user_id, token_id);
             }
         }
     }

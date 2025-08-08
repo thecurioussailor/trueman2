@@ -256,6 +256,7 @@ impl TradingEngine {
         
         // Simplified matching logic (you can make this more sophisticated)
         // Now execute the matching logic
+        
         let trades = match order.order_kind {
             OrderKind::Market => {
                 self.execute_market_order(&mut order, &market_info).await
@@ -589,7 +590,7 @@ impl TradingEngine {
             }
         }
 
-    /// Update individual user balance
+    /// Update individual user balance (KEEP THIS FUNCTION)
     async fn update_user_balance(&mut self, user_id: Uuid, token_id: Uuid, amount_delta: i64, locked_delta: i64) {
         let user_balance = self.balances.entry(user_id).or_insert_with(|| UserBalance {
             user_id,
@@ -605,12 +606,12 @@ impl TradingEngine {
         token_balance.locked += locked_delta;
 
         // Queue balance update for database
-        let balance_event = DBUpdateEvent::BalanceUpdated {
-            user_id,
-            token_id,
-            available: token_balance.available,
-            locked: token_balance.locked,
-        };
+        let balance_data = serde_json::json!({
+            "user_id": user_id,
+            "token_id": token_id,
+            "available": token_balance.available,
+            "locked": token_balance.locked
+        });
 
         // Send to db-updater queue
         let mut conn = self.redis_manager.clone();
@@ -620,7 +621,7 @@ impl TradingEngine {
             .arg("type")
             .arg("balance_updated")
             .arg("data")
-            .arg(serde_json::to_string(&balance_event).unwrap())
+            .arg(balance_data.to_string())
             .query_async(&mut conn)
             .await;
 }
@@ -668,27 +669,27 @@ impl TradingEngine {
         let mut conn = self.redis_manager.clone();
         
         // Queue order update
-        let order_event = DBUpdateEvent::OrderUpdated(order.clone());
+        let order_json = serde_json::to_string(&order).unwrap();
         let _: Result<String, _> = redis::cmd("XADD")
             .arg("db_update_queue")
             .arg("*")
             .arg("type")
             .arg("order_updated")
             .arg("data")
-            .arg(serde_json::to_string(&order_event).unwrap())
+            .arg(order_json)
             .query_async(&mut conn)
             .await;
         
         // Queue trade events
         for trade in trades {
-            let trade_event = DBUpdateEvent::TradeExecuted(trade.clone());
+            let trade_json = serde_json::to_string(&trade).unwrap();
             let _: Result<String, _> = redis::cmd("XADD")
                 .arg("db_update_queue")
                 .arg("*")
                 .arg("type")
                 .arg("trade_executed")
                 .arg("data")
-                .arg(serde_json::to_string(&trade_event).unwrap())
+                .arg(trade_json)
                 .query_async(&mut conn)
                 .await;
         }
@@ -917,34 +918,36 @@ impl TradingEngine {
             request.user_id
         );
     
-        // Get or create user balance and update it
-        let (new_balance, locked_amount) = {
-            // Get or create user balance
+        let (available_balance, locked_amount) = {
             let user_balance = self.balances.entry(request.user_id).or_insert_with(|| UserBalance {
                 user_id: request.user_id,
                 token_balances: HashMap::new(),
             });
-            
-            // Add to available balance
             let token_balance = user_balance.token_balances.entry(request.token_id).or_insert_with(|| TokenBalance {
                 available: 0,
                 locked: 0,
             });
-            
-            token_balance.available += request.amount;
-            
-            // Extract the values we need
             (token_balance.available, token_balance.locked)
-        }; // 🔑 The mutable borrow to self.balances is released here
+        };
+
+        let locked_amount = {
+            let user_balance = self.balances.get(&request.user_id).unwrap();
+            let tb = user_balance.token_balances.get(&request.token_id).unwrap();
+            tb.locked
+        };
         
-        // Now we can safely call methods that need mutable self
-        // Queue database update (async, non-blocking)
-        self.queue_balance_db_update(
+        self.update_user_balance(
             request.user_id, 
             request.token_id, 
-            new_balance, 
+            request.amount, 
             locked_amount
         ).await;
+        
+        let new_balance = {
+            let user_balance = self.balances.get(&request.user_id).unwrap();
+            let tb = user_balance.token_balances.get(&request.token_id).unwrap();
+            tb.available
+        };
         
         // Take snapshot if needed
         tracing::info!("💾 Taking snapshots");
@@ -977,16 +980,10 @@ impl TradingEngine {
         let withdrawal_result = {
             if let Some(user_balance) = self.balances.get_mut(&request.user_id) {
                 if let Some(token_balance) = user_balance.token_balances.get_mut(&request.token_id) {
-                    let available_balance = token_balance.available - token_balance.locked;
+                    let available_balance = token_balance.available;
                     
                     if available_balance >= request.amount {
-                        // Process withdrawal
-                        token_balance.available -= request.amount;
-                        let new_balance = token_balance.available;
-                        let locked_amount = token_balance.locked;
-                        
-                        // Return success with the new balance values
-                        Some((new_balance, locked_amount))
+                        Some(())
                     } else {
                         tracing::warn!("❌ Insufficient balance for withdrawal. Available: {}, Requested: {}", 
                             available_balance, request.amount);
@@ -1000,18 +997,23 @@ impl TradingEngine {
                 tracing::warn!("❌ No user balance found for user {}", request.user_id);
                 None
             }
-        }; // 🔑 The mutable borrow to self.balances is released here
+        }; 
     
-        // Now we can safely call methods that need mutable self
         match withdrawal_result {
-            Some((new_balance, locked_amount)) => {
+            Some(()) => {
                 // Queue database update (now safe because previous borrow is released)
-                self.queue_balance_db_update(
+                self.update_user_balance(
                     request.user_id, 
                     request.token_id, 
-                    new_balance, 
-                    locked_amount
+                    -request.amount, 
+                    0
                 ).await;
+
+                let new_balance = {
+                    let user_balance = self.balances.get(&request.user_id).unwrap();
+                    let tb = user_balance.token_balances.get(&request.token_id).unwrap();
+                    tb.available
+                };
                 
                 // Take snapshot if needed
                 self.operations_since_snapshot += 1;
@@ -1071,33 +1073,6 @@ impl TradingEngine {
         }
     }
     
-    /// Queue balance update for database persistence
-    async fn queue_balance_db_update(&mut self, user_id: Uuid, token_id: Uuid, available: i64, locked: i64) {
-        let balance_event = DBUpdateEvent::BalanceUpdated {
-            user_id,
-            token_id, 
-            available,
-            locked,
-        };
-        
-        let mut conn = self.redis_manager.clone();
-        let balance_json = serde_json::to_string(&balance_event).unwrap();
-        
-        let _: Result<String, _> = redis::cmd("XADD")
-            .arg("db_update_queue")
-            .arg("*")
-            .arg("type")
-            .arg("balance_updated")
-            .arg("data")
-            .arg(&balance_json)
-            .arg("timestamp")
-            .arg(chrono::Utc::now().timestamp_millis())
-            .query_async(&mut conn)
-            .await;
-            
-        tracing::debug!("📤 Queued balance DB update for user {} token {}", user_id, token_id);
-    }
-
     /// Load initial balances from database snapshots
     pub async fn load_balance_snapshots(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let mut conn = self.redis_manager.clone();
