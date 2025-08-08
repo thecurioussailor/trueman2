@@ -139,6 +139,7 @@ impl std::fmt::Display for OrderStatus {
 #[diesel(table_name = crate::schema::orders)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct NewOrder {
+    pub id: Uuid,
     pub user_id: Uuid,
     pub market_id: Uuid,
     pub order_type: String, // Will be converted from OrderType enum
@@ -174,6 +175,8 @@ pub struct NewTrade {
     pub market_id: Uuid,
     pub buyer_order_id: Uuid,
     pub seller_order_id: Uuid,
+    pub buyer_user_id: Uuid,
+    pub seller_user_id: Uuid,
     pub price: i64,
     pub quantity: i64,
 }
@@ -186,6 +189,8 @@ pub struct Trade {
     pub market_id: Uuid,
     pub buyer_order_id: Uuid,
     pub seller_order_id: Uuid,
+    pub buyer_user_id: Uuid,
+    pub seller_user_id: Uuid,
     pub price: i64,
     pub quantity: i64,
     pub created_at: NaiveDateTime,
@@ -221,6 +226,7 @@ pub struct TradeResponse {
 // Helper implementations for enum conversions
 impl NewOrder {
     pub fn new(
+        id: Uuid,
         user_id: Uuid,
         market_id: Uuid,
         order_type: OrderType,
@@ -229,6 +235,7 @@ impl NewOrder {
         quantity: i64,
     ) -> Self {
         Self {
+            id,
             user_id,
             market_id,
             order_type: order_type.to_string(),

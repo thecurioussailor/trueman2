@@ -60,6 +60,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let balance_response = trading_engine.process_balance_request(balance_request).await;
                                 EngineResponse::Balance(balance_response)
                             }
+                            EngineMessage::CancelOrder(cancel_order_request) => {
+                                info!("🔄 Processing cancel order: {}", cancel_order_request.request_id);
+                                let cancel_order_response = trading_engine.process_cancel_order(cancel_order_request).await;
+                                EngineResponse::Order(cancel_order_response)
+                            }
                         };
 
                         // Send unified response

@@ -152,7 +152,7 @@ impl TradingEngine {
         })
     }
     
-    /// Main order processing function
+    // KEEP THIS FUNCTION
     pub async fn process_order(&mut self, order_request: crate::redis_manager::OrderRequest) -> crate::redis_manager::OrderResponse {
         
         tracing::info!("🔄 Processing order: {} {} {} @ {:?}", 
@@ -165,6 +165,7 @@ impl TradingEngine {
         // 1. Convert request to internal order
         let order = self.create_order_from_request(order_request.clone());
         println!("Order: {:?}", order);
+        self.queue_order_created(&order).await;
         
         // 2. Validate balances (now we have balance data!)
         if !self.validate_order_balance(&order) {
@@ -183,7 +184,7 @@ impl TradingEngine {
         }
         
         // 3. Execute matching in memory
-        let (updated_order, trades) = self.match_order(order).await;
+        let (updated_order, matched_orders, trades) = self.match_order(order).await;
         println!("Trades: {:?}, Orders: {:?}", trades, updated_order);
         
         // // // 4. Update in-memory state
@@ -191,7 +192,7 @@ impl TradingEngine {
         // self.update_ticker_from_trades(&trades).await;
         
         // 5. Queue database updates (async, non-blocking)
-        self.queue_db_updates(&updated_order, &trades).await;
+        self.queue_db_updates(&updated_order, &matched_orders, &trades).await;
         
         // 6. Publish real-time updates (async, non-blocking)
         self.publish_market_events(&updated_order, &trades).await;
@@ -223,14 +224,14 @@ impl TradingEngine {
         }
     }
     
-    /// Execute order matching against orderbook
-    async fn match_order(&mut self, mut order: Order) -> (Order, Vec<Trade>) {
+    // KEEP THIS FUNCTION
+    async fn match_order(&mut self, mut order: Order) -> (Order, Vec<Order>, Vec<Trade>) {
         let market_info = match self.markets.get(&order.market_id).cloned() {
             Some(market) => market,
             None => {
                 tracing::error!("❌ Market not found: {}", order.market_id);
                 order.status = OrderStatus::Cancelled;
-                return (order, Vec::new());
+                return (order, Vec::new(), Vec::new());
             }
         };
 
@@ -257,7 +258,7 @@ impl TradingEngine {
         // Simplified matching logic (you can make this more sophisticated)
         // Now execute the matching logic
         
-        let trades = match order.order_kind {
+        let (trades, matched_orders) = match order.order_kind {
             OrderKind::Market => {
                 self.execute_market_order(&mut order, &market_info).await
             }
@@ -265,6 +266,8 @@ impl TradingEngine {
                 self.execute_limit_order(&mut order, &market_info).await
             }
         };
+
+        println!("Trades*********{:?}", trades);
            
         // Update balances based on trades
         if !trades.is_empty() {
@@ -276,17 +279,19 @@ impl TradingEngine {
         if let Some(orderbook) = self.orderbooks.get_mut(&order.market_id) {
             orderbook.last_updated = Utc::now().timestamp_millis();
         }
-        (order, trades)
+        (order, matched_orders, trades)
     }
     
-    async fn execute_market_order(&mut self, order: &mut Order, market_info: &MarketInfo) -> Vec<Trade> {
+    // KEEP THIS FUNCTION
+    async fn execute_market_order(&mut self, order: &mut Order, market_info: &MarketInfo) -> (Vec<Trade>, Vec<Order>) {
         let mut trades = Vec::new();
+        let mut matched_orders = Vec::new();
         let mut remaining_quantity = order.quantity;
 
         // Get the orderbook
         let orderbook = match self.orderbooks.get_mut(&order.market_id) {
             Some(ob) => ob,
-            None => return trades, // Should not happen, but safe fallback
+            None => return (trades, matched_orders), // Should not happen, but safe fallback
         };
 
         // Get the opposite side of the orderbook
@@ -361,9 +366,11 @@ impl TradingEngine {
                     // Update matching order status
                     if matching_order.filled_quantity >= matching_order.quantity {
                         matching_order.status = OrderStatus::Filled;
+                        matched_orders.push(matching_order.clone());
                         // Don't put it back in the queue - it's fully filled
                     } else {
                         matching_order.status = OrderStatus::PartiallyFilled;
+                        matched_orders.push(matching_order.clone());
                         order_queue.push_front(matching_order); // Put back partially filled order
                         break; // This price level still has liquidity
                     }
@@ -388,20 +395,21 @@ impl TradingEngine {
             OrderStatus::Cancelled // Market order couldn't be filled
         };
 
-        trades
+        (trades, matched_orders)
     }
 
-    /// Execute a limit order (try to match, then add remainder to orderbook)
-    async fn execute_limit_order(&mut self, order: &mut Order, market_info: &MarketInfo) -> Vec<Trade> {
+    // KEEP THIS FUNCTION
+    async fn execute_limit_order(&mut self, order: &mut Order, market_info: &MarketInfo) -> (Vec<Trade>, Vec<Order>) {
         println!("Executing limit order: {:?}", order);
         let mut trades = Vec::new();
+        let mut matched_orders = Vec::new();
         let order_price = order.price.expect("Limit order must have a price");
         let mut remaining_quantity = order.quantity;
 
         // Get the orderbook
         let orderbook = match self.orderbooks.get_mut(&order.market_id) {
             Some(ob) => ob,
-            None => return trades, // Should not happen, but safe fallback
+            None => return (trades, matched_orders), // Should not happen, but safe fallback
         };
         println!("Orderbook: {:?}", orderbook);
 
@@ -489,8 +497,10 @@ impl TradingEngine {
                     // Update matching order status
                     if matching_order.filled_quantity >= matching_order.quantity {
                         matching_order.status = OrderStatus::Filled;
+                        matched_orders.push(matching_order.clone());
                     } else {
                         matching_order.status = OrderStatus::PartiallyFilled;
+                        matched_orders.push(matching_order.clone());
                         order_queue.push_front(matching_order);
                         break;
                     }
@@ -541,10 +551,10 @@ impl TradingEngine {
             OrderStatus::Pending
         };
 
-        trades
+        (trades, matched_orders)
     }
     
-    /// Update user balances based on executed trades
+    
     async fn update_balances_from_trades(&mut self, trades: &[Trade], market_info: &MarketInfo) {
         for trade in trades {
 
@@ -590,7 +600,7 @@ impl TradingEngine {
             }
         }
 
-    /// Update individual user balance (KEEP THIS FUNCTION)
+    // KEEP THIS FUNCTION
     async fn update_user_balance(&mut self, user_id: Uuid, token_id: Uuid, amount_delta: i64, locked_delta: i64) {
         let user_balance = self.balances.entry(user_id).or_insert_with(|| UserBalance {
             user_id,
@@ -664,8 +674,24 @@ impl TradingEngine {
             );
         }
     }
+    
+    // KEEP THIS FUNCTION
+    async fn queue_order_created(&mut self, order: &Order) {
+        let mut conn = self.redis_manager.clone();
+        let order_json = serde_json::to_string(&order).unwrap();
+        let _: Result<String, _> = redis::cmd("XADD")
+            .arg("db_update_queue")
+            .arg("*")
+            .arg("type")
+            .arg("order_created")
+            .arg("data")
+            .arg(order_json)
+            .query_async(&mut conn)
+            .await;
+        tracing::info!("📤 Queued order_created for {}", order.id);
+    }
     /// Queue updates for db-updater service
-    async fn queue_db_updates(&mut self, order: &Order, trades: &[Trade]) {
+    async fn queue_db_updates(&mut self, order: &Order, matched_orders: &[Order], trades: &[Trade]) {
         let mut conn = self.redis_manager.clone();
         
         // Queue order update
@@ -678,8 +704,22 @@ impl TradingEngine {
             .arg("data")
             .arg(order_json)
             .query_async(&mut conn)
-            .await;
-        
+            .await; 
+
+        // Queue matched orders updates
+        for maker in matched_orders {
+            let maker_json = serde_json::to_string(&maker).unwrap();
+            let _: Result<String, _> = redis::cmd("XADD")
+                .arg("db_update_queue")
+                .arg("*")
+                .arg("type")
+                .arg("order_updated")
+                .arg("data")
+                .arg(maker_json)
+                .query_async(&mut conn)
+                .await;
+        }
+
         // Queue trade events
         for trade in trades {
             let trade_json = serde_json::to_string(&trade).unwrap();
@@ -694,7 +734,7 @@ impl TradingEngine {
                 .await;
         }
         
-        tracing::info!("📤 Queued {} DB updates", 1 + trades.len());
+        tracing::info!("📤 Queued {} DB updates", 1 + matched_orders.len() + trades.len());
     }
     
     /// Publish real-time market events
@@ -737,7 +777,7 @@ impl TradingEngine {
         tracing::info!("📡 Published market events for {} trades", trades.len());
     }
     
-    /// Take periodic snapshots for recovery
+    // KEEP THIS FUNCTION
     async fn take_snapshots(&mut self) {
     tracing::info!("💾 Starting snapshot process...");
     tracing::info!("📊 Current state: {} balances, {} orderbooks, {} tickers", 
@@ -843,7 +883,7 @@ impl TradingEngine {
         tracing::info!("✅ Snapshot process completed: {} snapshots saved at {}", snapshot_count, timestamp);
     }
     
-    // Helper methods...
+    // KEEP THIS FUNCTION
     fn create_order_from_request(&self, req: crate::redis_manager::OrderRequest) -> Order {
         Order {
             id: Uuid::new_v4(),
@@ -1309,5 +1349,82 @@ impl TradingEngine {
             // We can fulfill the order - return average price
             Some(total_cost / quantity)
         }
+    }
+
+    //KEEP THIS FUNCTION
+    pub async fn process_cancel_order(
+        &mut self,
+        req: crate::redis_manager::CancelOrderRequest
+    ) -> crate::redis_manager::OrderResponse {
+        tracing::info!("🔄 Processing cancel order: {}", req.request_id);
+
+        let maybe_order = self.remove_order_from_orderbook(req.market_id, req.order_id);
+
+        match maybe_order {
+            Some(mut order) => {
+                // Auth check
+                if order.user_id != req.user_id {
+                    return crate::redis_manager::OrderResponse {
+                        request_id: req.request_id,
+                        success: false,
+                        status: "REJECTED".to_string(),
+                        order_id: Some(order.id),
+                        message: "Order does not belong to user".to_string(),
+                        filled_quantity: Some(order.filled_quantity),
+                        remaining_quantity: Some(order.quantity - order.filled_quantity),
+                        average_price: None,
+                        trades: None,
+                    }
+                }
+
+                // Update order status
+                order.status = OrderStatus::Cancelled;
+                self.queue_db_updates(&order, &[], &[]).await;
+
+                self.publish_market_events(&order, &[]).await;
+                
+                crate::redis_manager::OrderResponse {
+                    request_id: req.request_id,
+                    success: true,
+                    status: "CANCELLED".to_string(),
+                    order_id: Some(order.id),
+                    message: "Order cancelled successfully".to_string(),
+                    filled_quantity: Some(order.filled_quantity),
+                    remaining_quantity: Some(order.quantity - order.filled_quantity),
+                    average_price: None,
+                    trades: Some(Vec::new()),
+                }
+            }
+            None => {
+                crate::redis_manager::OrderResponse {
+                    request_id: req.request_id,
+                    success: false,
+                    status: "REJECTED".to_string(),
+                    order_id: None,
+                    message: "Order not found".to_string(),
+                    filled_quantity: None,
+                    remaining_quantity: None,
+                    average_price: None,
+                    trades: None,
+                }
+            }
+        }
+    }
+
+    fn remove_order_from_orderbook(&mut self, market_id: Uuid, order_id: Uuid) -> Option<Order> {
+        let orderbook = self.orderbooks.get_mut(&market_id)?;
+        
+        for (_price, queue) in orderbook.bids.iter_mut() {
+            if let Some(pos) = queue.iter().position(|o| o.id == order_id) {
+                return Some(queue.remove(pos).unwrap());
+            }
+        }
+        
+        for (_price, queue) in orderbook.asks.iter_mut() {
+            if let Some(pos) = queue.iter().position(|o| o.id == order_id) {
+                return Some(queue.remove(pos).unwrap());
+            }
+        }
+        None
     }
 }

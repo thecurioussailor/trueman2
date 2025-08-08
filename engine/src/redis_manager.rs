@@ -8,6 +8,7 @@ use uuid::Uuid;
 pub enum EngineMessage {
     Order(OrderRequest),
     Balance(BalanceRequest),
+    CancelOrder(CancelOrderRequest),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -16,6 +17,16 @@ pub enum EngineResponse {
     Order(OrderResponse),
     Balance(BalanceResponse),
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CancelOrderRequest {
+    pub request_id: String,
+    pub user_id: Uuid,
+    pub order_id: Uuid,
+    pub market_id: Uuid,
+    pub timestamp: i64,
+}
+
 // Re-use the same structs as API for consistency
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderRequest {

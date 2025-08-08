@@ -67,6 +67,8 @@ diesel::table! {
         price -> Int8,
         quantity -> Int8,
         created_at -> Timestamp,
+        buyer_user_id -> Uuid,
+        seller_user_id -> Uuid,
     }
 }
 

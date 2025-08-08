@@ -11,6 +11,7 @@ use futures_util::StreamExt;
 pub enum EngineMessage {
     Order(OrderRequest),
     Balance(BalanceRequest),
+    CancelOrder(CancelOrderRequest),
     // Future: Trade queries, market data requests, etc.
 }
 
@@ -19,6 +20,15 @@ pub enum EngineMessage {
 pub enum EngineResponse {
     Order(OrderResponse),
     Balance(BalanceResponse),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CancelOrderRequest {
+    pub request_id: String,
+    pub user_id: Uuid,
+    pub order_id: Uuid,
+    pub market_id: Uuid,
+    pub timestamp: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -127,6 +137,7 @@ impl RedisManager {
         let request_id = match &message {
             EngineMessage::Order(req) => req.request_id.clone(),
             EngineMessage::Balance(req) => req.request_id.clone(),
+            EngineMessage::CancelOrder(req) => req.request_id.clone(),
         };
         
         // Step 1: Subscribe to response channel BEFORE queuing
@@ -195,6 +206,7 @@ impl RedisManager {
         let (request_id, message_type) = match &message {
             EngineMessage::Order(req) => (req.request_id.clone(), "ORDER"),
             EngineMessage::Balance(req) => (req.request_id.clone(), "BALANCE"),
+            EngineMessage::CancelOrder(req) => (req.request_id.clone(), "CANCEL_ORDER"),
         };
         // Add to Redis Stream - this is what the engine will consume
         let stream_id: String = redis::cmd("XADD")

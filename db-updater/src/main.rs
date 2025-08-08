@@ -110,6 +110,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             
             // Group and order updates
             let ordered_updates = order_updates_by_dependencies(updates);
+            println!("ordered_updates: {:?}", ordered_updates);
             
             // Process in dependency order within a transaction
             db_conn.transaction::<_, Box<dyn std::error::Error>, _>(|tx_conn| {
@@ -361,24 +362,25 @@ fn process_db_update(
             tracing::info!("💾 Creating order {} in database", order_data.id);
             
             let new_order = NewOrder {
+                id: order_data.id,
                 user_id: order_data.user_id,
                 market_id: order_data.market_id,
                 order_type: match order_data.order_type {
-                    EngineOrderType::Buy => "Buy".to_string(),
-                    EngineOrderType::Sell => "Sell".to_string(),
+                    EngineOrderType::Buy => "BUY".to_string(),
+                    EngineOrderType::Sell => "SELL".to_string(),
                 },
                 order_kind: match order_data.order_kind {
-                    EngineOrderKind::Market => "Market".to_string(),
-                    EngineOrderKind::Limit => "Limit".to_string(),
+                    EngineOrderKind::Market => "MARKET".to_string(),
+                    EngineOrderKind::Limit => "LIMIT".to_string(),
                 },
                 price: order_data.price,
                 quantity: order_data.quantity,
                 filled_quantity: Some(order_data.filled_quantity),
                 status: Some(match order_data.status {
-                    EngineOrderStatus::Pending => "Pending".to_string(),
-                    EngineOrderStatus::PartiallyFilled => "PartiallyFilled".to_string(),
-                    EngineOrderStatus::Filled => "Filled".to_string(),
-                    EngineOrderStatus::Cancelled => "Cancelled".to_string(),
+                    EngineOrderStatus::Pending => "PENDING".to_string(),
+                    EngineOrderStatus::PartiallyFilled => "PARTIALLY_FILLED".to_string(),
+                    EngineOrderStatus::Filled => "FILLED".to_string(),
+                    EngineOrderStatus::Cancelled => "CANCELLED".to_string(),
                 }),
             };
             
@@ -396,10 +398,10 @@ fn process_db_update(
             tracing::info!("💾 Updating order {} in database", order_data.id);
             
             let status_str = match order_data.status {
-                EngineOrderStatus::Pending => "Pending",
-                EngineOrderStatus::PartiallyFilled => "PartiallyFilled",
-                EngineOrderStatus::Filled => "Filled",
-                EngineOrderStatus::Cancelled => "Cancelled",
+                EngineOrderStatus::Pending => "PENDING",
+                EngineOrderStatus::PartiallyFilled => "PARTIALLY_FILLED",
+                EngineOrderStatus::Filled => "FILLED",
+                EngineOrderStatus::Cancelled => "CANCELLED",
             };
             
             // First try to update existing order
@@ -416,15 +418,16 @@ fn process_db_update(
                 tracing::warn!("Order {} not found for update, creating it", order_data.id);
                 
                 let new_order = NewOrder {
+                    id: order_data.id,
                     user_id: order_data.user_id,
                     market_id: order_data.market_id,
                     order_type: match order_data.order_type {
-                        EngineOrderType::Buy => "Buy".to_string(),
-                        EngineOrderType::Sell => "Sell".to_string(),
+                        EngineOrderType::Buy => "BUY".to_string(),
+                        EngineOrderType::Sell => "SELL".to_string(),
                     },
                     order_kind: match order_data.order_kind {
-                        EngineOrderKind::Market => "Market".to_string(),
-                        EngineOrderKind::Limit => "Limit".to_string(),
+                        EngineOrderKind::Market => "MARKET".to_string(),
+                        EngineOrderKind::Limit => "LIMIT".to_string(),
                     },
                     price: order_data.price,
                     quantity: order_data.quantity,
@@ -449,6 +452,8 @@ fn process_db_update(
                 market_id: trade_data.market_id,
                 buyer_order_id: trade_data.buyer_order_id,
                 seller_order_id: trade_data.seller_order_id,
+                buyer_user_id: trade_data.buyer_user_id,
+                seller_user_id: trade_data.seller_user_id,
                 price: trade_data.price,
                 quantity: trade_data.quantity,
             };

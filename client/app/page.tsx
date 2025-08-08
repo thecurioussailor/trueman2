@@ -1,0 +1,216 @@
+import Link from "next/link";
+
+export default function Home() {
+  return (
+    <main className="relative min-h-screen text-zinc-100 bg-[#0b0f14] overflow-x-hidden">
+      {/* BG gradients */}
+      <div className="pointer-events-none absolute inset-0 -z-10">
+        <div className="absolute -top-40 -left-32 h-[42rem] w-[42rem] rounded-full blur-3xl bg-gradient-to-br from-violet-600/30 to-cyan-400/20" />
+        <div className="absolute -top-32 right-0 h-[36rem] w-[36rem] rounded-full blur-3xl bg-gradient-to-tr from-cyan-400/20 to-violet-600/20" />
+      </div>
+
+      {/* Header */}
+      <header className="sticky top-0 z-20 border-b border-white/10 bg-black/20 backdrop-blur">
+        <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-4">
+          <div className="flex items-center gap-3 font-semibold">
+            <Logo />
+            <span className="tracking-tight">Trueman Exchange</span>
+          </div>
+          <nav className="hidden md:flex items-center gap-6 text-sm text-zinc-300">
+            <Link href="/user/markets" className="hover:text-white">Markets</Link>
+            <Link href="/user/orders" className="hover:text-white">Orders</Link>
+            <Link href="/user/trades" className="hover:text-white">Trades</Link>
+            <Link href="/fees" className="hover:text-white">Fees</Link>
+          </nav>
+          <div className="flex items-center gap-2">
+            <Link href="/login" className="flex justify-center items-center h-9 rounded-lg border border-white/15 px-3 text-sm text-white hover:bg-white/5">
+              Log in
+            </Link>
+            <Link
+              href="/signup"
+              className="flex justify-center items-center h-9 rounded-lg bg-gradient-to-r from-violet-500 to-cyan-400 px-3 text-sm font-semibold text-black hover:brightness-110"
+            >
+              Sign up
+            </Link>
+          </div>
+        </div>
+      </header>
+
+      {/* Hero */}
+      <section className="px-4 py-24">
+        <div className="mx-auto max-w-5xl py-16 text-center">
+          <h1 className="mx-auto max-w-4xl text-4xl font-extrabold leading-tight tracking-tight sm:text-6xl">
+            Trade crypto with confidence on{" "}
+            <span className="bg-gradient-to-r from-violet-400 to-cyan-300 bg-clip-text text-transparent">
+              Trueman Exchange
+            </span>
+          </h1>
+          <p className="mx-auto mt-4 max-w-2xl text-zinc-300">
+            A fast, secure, and intuitive centralized exchange. Low fees, deep liquidity, and a modern UI inspired by the best.
+          </p>
+          <div className="mt-6 flex flex-wrap justify-center gap-3">
+            <Link
+              href="/signup"
+              className="flex justify-center items-center h-11 rounded-xl bg-gradient-to-r from-violet-500 to-cyan-400 px-5 text-sm font-bold text-black hover:brightness-110"
+            >
+              Get Started
+            </Link>
+            <Link
+              href="/login"
+              className="flex justify-center items-center h-11 rounded-xl border border-white/15 bg-white/5 px-5 text-sm font-semibold text-white hover:bg-white/10"
+            >
+              Launch App
+            </Link>
+          </div>
+
+          {/* Stats */}
+          <div className="mt-10 grid grid-cols-1 gap-3 sm:grid-cols-3">
+            <Stat label="Maker Fee" value="0.05%" />
+            <Stat label="Uptime" value="99.99%" />
+            <Stat label="Match Latency" value="100ms" />
+          </div>
+        </div>
+      </section>
+
+      {/* Features */}
+      <section className="px-4 py-10">
+        <div className="mx-auto max-w-6xl">
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
+            <Card
+              title="Deep Liquidity"
+              desc="Tight spreads across major pairs with robust orderbooks."
+              icon={<IconBooks />}
+            />
+            <Card
+              title="Advanced Security"
+              desc="Hardened infra, best-practice auth, and continuous monitoring."
+              icon={<IconShield />}
+            />
+            <Card
+              title="Pro Tools"
+              desc="Market/limit orders, live charts, order history, and more."
+              icon={<IconTools />}
+            />
+            <Card
+              title="Low Fees"
+              desc="Transparent maker/taker fees with volume discounts."
+              icon={<IconStar />}
+            />
+          </div>
+        </div>
+      </section>
+
+      {/* Top Markets */}
+      <section className="px-4 pb-16">
+        <div className="mx-auto max-w-6xl">
+          <div className="mb-3 flex items-center justify-between">
+            <h2 className="text-lg font-extrabold">Top Markets</h2>
+            <Link href="/user/markets" className="text-sm text-zinc-300 hover:text-white">
+              View all
+            </Link>
+          </div>
+
+          <div className="overflow-hidden rounded-xl border border-white/10 bg-white/5">
+            <table className="w-full border-collapse text-sm">
+              <thead className="bg-white/5 text-zinc-300">
+                <tr>
+                  <th className="px-4 py-3 text-left font-medium">Pair</th>
+                  <th className="px-4 py-3 text-left font-medium">Price</th>
+                  <th className="px-4 py-3 text-left font-medium">24h Change</th>
+                  <th className="px-4 py-3 text-left font-medium">24h Volume</th>
+                </tr>
+              </thead>
+              <tbody>
+                {[
+                  { pair: "BTC/USDC", price: "68,420", change: "+2.4%", vol: "12,345 BTC" },
+                  { pair: "ETH/USDC", price: "3,420", change: "-1.2%", vol: "98,210 ETH" },
+                  { pair: "SOL/USDC", price: "168", change: "+5.1%", vol: "2,340,100 SOL" },
+                ].map((m) => (
+                  <tr key={m.pair} className="border-t border-white/10">
+                    <td className="px-4 py-3">{m.pair}</td>
+                    <td className="px-4 py-3">${m.price}</td>
+                    <td
+                      className={`px-4 py-3 font-semibold ${
+                        m.change.startsWith("+") ? "text-emerald-400" : "text-rose-400"
+                      }`}
+                    >
+                      {m.change}
+                    </td>
+                    <td className="px-4 py-3">{m.vol}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      {/* Footer */}
+      <footer className="border-t border-white/10 bg-black/20">
+        <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-6 text-sm text-zinc-300">
+          <div>© {new Date().getFullYear()} Trueman Exchange</div>
+          <div className="flex gap-4">
+            <Link href="/terms" className="hover:text-white">Terms</Link>
+            <Link href="/privacy" className="hover:text-white">Privacy</Link>
+            <Link href="/fees" className="hover:text-white">Fees</Link>
+            <Link href="/support" className="hover:text-white">Support</Link>
+          </div>
+        </div>
+      </footer>
+    </main>
+  );
+}
+
+function Stat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-xl border border-white/10 bg-white/5 p-5 text-center">
+      <div className="text-xl font-extrabold">{value}</div>
+      <div className="mt-1 text-xs text-zinc-400">{label}</div>
+    </div>
+  );
+}
+
+function Card({
+  title,
+  desc,
+  icon,
+}: {
+  title: string;
+  desc: string;
+  icon: React.ReactNode;
+}) {
+  return (
+    <div className="h-full rounded-2xl border border-white/10 bg-gradient-to-b from-white/10 to-white/5 p-5">
+      <div className="mb-3 text-zinc-300">{icon}</div>
+      <div className="mb-1 font-bold">{title}</div>
+      <div className="text-sm text-zinc-300">{desc}</div>
+    </div>
+  );
+}
+
+function Logo() {
+  return (
+    <svg width="26" height="26" viewBox="0 0 24 24" aria-hidden className="block">
+      <defs>
+        <linearGradient id="gx" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stopColor="#7C3AED" />
+          <stop offset="100%" stopColor="#06B6D4" />
+        </linearGradient>
+      </defs>
+      <path fill="url(#gx)" d="M12 2l9 5v10l-9 5-9-5V7l9-5zm0 2.2L5 7v8l7 3.8L19 15V7l-7-2.8z" />
+    </svg>
+  );
+}
+
+function IconBooks() {
+  return <svg viewBox="0 0 24 24" width="24" height="24"><path fill="currentColor" d="M3 3h18v2H3V3zm2 4h14v2H5V7zm-2 4h18v2H3v-2zm2 4h10v2H5v-2zm-2 4h18v2H3v-2z"/></svg>;
+}
+function IconShield() {
+  return <svg viewBox="0 0 24 24" width="24" height="24"><path fill="currentColor" d="M12 2l8 4v6c0 5-3.4 9.7-8 10-4.6-.3-8-5-8-10V6l8-4zM7 10h10v2H7v-2z"/></svg>;
+}
+function IconTools() {
+  return <svg viewBox="0 0 24 24" width="24" height="24"><path fill="currentColor" d="M4 4h16v2H4V4zm2 4h6v2H6V8zm0 4h12v2H6v-2zm0 4h8v2H6v-2z"/></svg>;
+}
+function IconStar() {
+  return <svg viewBox="0 0 24 24" width="24" height="24"><path fill="currentColor" d="M12 1l3 5 6 .9-4.3 4.2 1 6-5.7-3-5.7 3 1-6L3 6.9 9 6z"/></svg>;
+}
