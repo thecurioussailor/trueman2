@@ -120,12 +120,23 @@ pub struct TokenInfo {
     pub is_active: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DepthUpdate {
+    pub market_id: Uuid,
+    pub seq: u64,
+    pub ts: i64,
+    pub bids: Vec<(i64, i64)>, // price, total_qty
+    pub asks: Vec<(i64, i64)>, // price, total_qty
+}
+
 pub struct TradingEngine {
     // IN-MEMORY: Core trading data
     orderbooks: HashMap<Uuid, OrderBook>,
     balances: HashMap<Uuid, UserBalance>,
     tickers: HashMap<Uuid, MarketTicker>,
     markets: HashMap<Uuid, MarketInfo>,
+    depth_seq: HashMap<Uuid, u64>,
+    ticker_seq: HashMap<Uuid, u64>,
     
     // REDIS: Communication layer
     redis_manager: ConnectionManager,
@@ -145,6 +156,8 @@ impl TradingEngine {
             balances: HashMap::new(),
             tickers: HashMap::new(),
             markets: HashMap::new(),
+            depth_seq: HashMap::new(),
+            ticker_seq: HashMap::new(),
 
             redis_manager,
             operations_since_snapshot: 0,
@@ -165,37 +178,87 @@ impl TradingEngine {
         // 1. Convert request to internal order
         let order = self.create_order_from_request(order_request.clone());
         println!("Order: {:?}", order);
-        self.queue_order_created(&order).await;
         
-        // 2. Validate balances (now we have balance data!)
-        if !self.validate_order_balance(&order) {
-            tracing::warn!("❌ Order rejected: Insufficient balance");
-            return crate::redis_manager::OrderResponse {
-                request_id: order_request.request_id,
-                success: false,
-                status: "REJECTED".to_string(),
-                order_id: None,
-                message: "Insufficient balance".to_string(),
-                filled_quantity: None,
-                remaining_quantity: None,
-                average_price: None,
-                trades: None,
-            };
+        // 2) Validate + lock funds BEFORE persisting created
+        let market = match self.markets.get(&order.market_id).cloned() {
+            Some(m) => m,
+            None => {
+                tracing::warn!("❌ Market not found");
+                return crate::redis_manager::OrderResponse {
+                    request_id: order_request.request_id, success: false, status: "REJECTED".to_string(),
+                    order_id: None, message: "Market not found".to_string(),
+                    filled_quantity: None, remaining_quantity: None, average_price: None, trades: None
+                };
+            }
+        };
+
+        // For resting limit orders: lock upfront
+        if matches!(order.order_kind, OrderKind::Limit) {
+            match order.order_type {
+                OrderType::Buy => {
+                    let price = order.price.ok_or_else(|| {
+                        tracing::warn!("❌ Limit buy without price");
+                    });
+                    if order.price.is_none() {
+                        return crate::redis_manager::OrderResponse {
+                            request_id: order_request.request_id, success: false, status: "REJECTED".to_string(),
+                            order_id: None, message: "Limit buy requires price".to_string(),
+                            filled_quantity: None, remaining_quantity: None, average_price: None, trades: None
+                        };
+                    }
+                    let need = order.price.unwrap() * order.quantity;
+                    if let Err(e) = self.lock(order.user_id, market.quote_currency.id, need).await {
+                        tracing::warn!("❌ Order rejected: {}", e);
+                        return crate::redis_manager::OrderResponse {
+                            request_id: order_request.request_id, success: false, status: "REJECTED".to_string(),
+                            order_id: None, message: e.to_string(), filled_quantity: None, remaining_quantity: None,
+                            average_price: None, trades: None
+                        };
+                    }
+                }
+                OrderType::Sell => {
+                    if let Err(e) = self.lock(order.user_id, market.base_currency.id, order.quantity).await {
+                        tracing::warn!("❌ Order rejected: {}", e);
+                        return crate::redis_manager::OrderResponse {
+                            request_id: order_request.request_id, success: false, status: "REJECTED".to_string(),
+                            order_id: None, message: e.to_string(), filled_quantity: None, remaining_quantity: None,
+                            average_price: None, trades: None
+                        };
+                    }
+                }
+            }
         }
-        
+
+        // // 2. Validate balances (now we have balance data!)
+        // if !self.validate_order_balance(&order) {
+        //     tracing::warn!("❌ Order rejected: Insufficient balance");
+        //     return crate::redis_manager::OrderResponse {
+        //         request_id: order_request.request_id,
+        //         success: false,
+        //         status: "REJECTED".to_string(),
+        //         order_id: None,
+        //         message: "Insufficient balance".to_string(),
+        //         filled_quantity: None,
+        //         remaining_quantity: None,
+        //         average_price: None,
+        //         trades: None,
+        //     };
+        // }
+
+        self.queue_order_created(&order).await;
         // 3. Execute matching in memory
         let (updated_order, matched_orders, trades) = self.match_order(order).await;
         println!("Trades: {:?}, Orders: {:?}", trades, updated_order);
         
-        // // // 4. Update in-memory state
-        // self.update_balances_from_trades(&trades).await;
-        // self.update_ticker_from_trades(&trades).await;
+        let market_id = updated_order.market_id;
+        self.publish_depth(market_id).await;
+        if !trades.is_empty() {
+            self.publish_trades(market_id, &trades).await;   // new trades
+            self.publish_ticker(market_id).await;            // last price from trades
+        }
         
         // 5. Queue database updates (async, non-blocking)
         self.queue_db_updates(&updated_order, &matched_orders, &trades).await;
-        
-        // 6. Publish real-time updates (async, non-blocking)
-        self.publish_market_events(&updated_order, &trades).await;
         
         // 7. Check if snapshot needed
         self.operations_since_snapshot += 1;
@@ -281,7 +344,59 @@ impl TradingEngine {
         }
         (order, matched_orders, trades)
     }
+    // KEEP THIS FUNCTION
+    fn build_depth(&self, market_id: Uuid, top_n: usize) -> Option<(Vec<(i64,i64)>, Vec<(i64,i64)>)> {
+        let ob = self.orderbooks.get(&market_id)?;
+        let bids = ob.bids.iter().rev().take(top_n).map(|(&price, orders)| {
+            let q: i64 = orders.iter().map(|o| o.quantity - o.filled_quantity).sum();
+            (price, q)
+        }).collect::<Vec<_>>();
+        let asks = ob.asks.iter().take(top_n).map(|(&price, orders)| {
+            let q: i64 = orders.iter().map(|o| o.quantity - o.filled_quantity).sum();
+            (price, q)
+        }).collect::<Vec<_>>();
+        Some((bids, asks))
+    }
+
+    async fn publish_depth(&mut self, market_id: Uuid) {
+        if let Some((bids, asks)) = self.build_depth(market_id, 50) { // top 50
+            let seq = self.depth_seq.entry(market_id).and_modify(|s| *s += 1).or_insert(1);
+            let update = DepthUpdate {
+                market_id,
+                seq: *seq,
+                ts: chrono::Utc::now().timestamp_millis(),
+                bids,
+                asks,
+            };
+            let mut conn = self.redis_manager.clone();
+            let _: Result<(), _> = conn.publish(
+                format!("depth:{}", market_id),
+                serde_json::to_string(&update).unwrap()
+            ).await;
+        }
+    }
+
+    async fn publish_ticker(&mut self, market_id: Uuid) {
+        if let Some(ticker) = self.tickers.get(&market_id) {
+            let _seq = self.ticker_seq.entry(market_id).and_modify(|s| *s += 1).or_insert(1);
+            let mut conn = self.redis_manager.clone();
+            let _: Result<(), _> = conn.publish(
+                format!("ticker:{}", market_id),
+                serde_json::to_string(&ticker).unwrap()
+            ).await;
+        }
+    }
     
+    async fn publish_trades(&mut self, market_id: Uuid, trades: &[Trade]) {
+        if trades.is_empty() { return; }
+        let mut conn = self.redis_manager.clone();
+        for trade in trades {
+            let _: Result<(), _> = conn.publish(
+                format!("trades:{}", market_id),
+                serde_json::to_string(trade).unwrap()
+            ).await;
+        }
+    }
     // KEEP THIS FUNCTION
     async fn execute_market_order(&mut self, order: &mut Order, market_info: &MarketInfo) -> (Vec<Trade>, Vec<Order>) {
         let mut trades = Vec::new();
@@ -554,51 +669,33 @@ impl TradingEngine {
         (trades, matched_orders)
     }
     
-    
+    // KEEP THIS FUNCTION
     async fn update_balances_from_trades(&mut self, trades: &[Trade], market_info: &MarketInfo) {
         for trade in trades {
 
             let buyer_id = trade.buyer_user_id;  // Now using User ID
             let seller_id = trade.seller_user_id; 
+            let quote_id = market_info.quote_currency.id;
+            let base_id  = market_info.base_currency.id;
+            let cost = trade.price * trade.quantity;
 
-                self.update_user_balance(
-                    buyer_id, 
-                    market_info.quote_currency.id, 
-                    -(trade.price * trade.quantity), // Decrease USDC
-                    0
-                ).await;
-                
-                self.update_user_balance(
-                    buyer_id, 
-                    market_info.base_currency.id, 
-                    trade.quantity, // Increase SOL/BTC/ETH
-                    0
-                ).await;
+            // Buyer: spend quote (locked if resting limit or immediate if market), credit base
+            self.spend_locked_or_available(buyer_id, quote_id, cost).await;
+            self.credit(buyer_id, base_id, trade.quantity).await;
 
-                // Update seller balance: increase quote currency, decrease base currency
-                self.update_user_balance(
-                    seller_id, 
-                    market_info.quote_currency.id, 
-                    trade.price * trade.quantity, // Increase USDC
-                    0
-                ).await;
-                
-                self.update_user_balance(
-                    seller_id, 
-                    market_info.base_currency.id, 
-                    -trade.quantity, // Decrease SOL/BTC/ETH
-                    0
-                ).await;
+            // Seller: spend base (locked if resting limit), credit quote
+            self.spend_locked_or_available(seller_id, base_id, trade.quantity).await;
+            self.credit(seller_id, quote_id, cost).await;
 
-                tracing::info!("💰 Updated balances for trade: {} {} @ {} between users {} and {}", 
-                    trade.quantity, 
-                    market_info.base_currency.symbol, 
-                    trade.price,
-                    buyer_id,
-                    seller_id
-                );
-            }
+            tracing::info!("💰 Updated balances for trade: {} {} @ {} between users {} and {}", 
+                trade.quantity, 
+                market_info.base_currency.symbol, 
+                trade.price,
+                buyer_id,
+                seller_id
+            );
         }
+    }
 
     // KEEP THIS FUNCTION
     async fn update_user_balance(&mut self, user_id: Uuid, token_id: Uuid, amount_delta: i64, locked_delta: i64) {
@@ -690,6 +787,7 @@ impl TradingEngine {
             .await;
         tracing::info!("📤 Queued order_created for {}", order.id);
     }
+    // KEEP THIS FUNCTION
     /// Queue updates for db-updater service
     async fn queue_db_updates(&mut self, order: &Order, matched_orders: &[Order], trades: &[Trade]) {
         let mut conn = self.redis_manager.clone();
@@ -737,45 +835,45 @@ impl TradingEngine {
         tracing::info!("📤 Queued {} DB updates", 1 + matched_orders.len() + trades.len());
     }
     
-    /// Publish real-time market events
-    async fn publish_market_events(&mut self, order: &Order, trades: &[Trade]) {
-        let mut conn = self.redis_manager.clone();
+    // /// Publish real-time market events
+    // async fn publish_market_events(&mut self, order: &Order, trades: &[Trade]) {
+    //     let mut conn = self.redis_manager.clone();
         
-        // Publish orderbook update
-        if let Some(orderbook) = self.orderbooks.get(&order.market_id) {
-            let snapshot = self.create_orderbook_snapshot(orderbook);
-            let event = MarketEvent::OrderBookUpdate {
-                market_id: order.market_id,
-                orderbook: snapshot,
-            };
+    //     // Publish orderbook update
+    //     if let Some(orderbook) = self.orderbooks.get(&order.market_id) {
+    //         let snapshot = self.create_orderbook_snapshot(orderbook);
+    //         let event = MarketEvent::OrderBookUpdate {
+    //             market_id: order.market_id,
+    //             orderbook: snapshot,
+    //         };
             
-            let channel = format!("market_events:{}", order.market_id);
-            let message = serde_json::to_string(&event).unwrap();
+    //         let channel = format!("market_events:{}", order.market_id);
+    //         let message = serde_json::to_string(&event).unwrap();
             
-            // Now this will work because AsyncCommands is imported
-            let _: Result<(), _> = conn.publish(channel, message).await;
-        }
+    //         // Now this will work because AsyncCommands is imported
+    //         let _: Result<(), _> = conn.publish(channel, message).await;
+    //     }
         
-        // Publish ticker update
-        if let Some(ticker) = self.tickers.get(&order.market_id) {
-            let event = MarketEvent::TickerUpdate(ticker.clone());
-            let channel = format!("ticker_events:{}", order.market_id);
-            let message = serde_json::to_string(&event).unwrap();
+    //     // Publish ticker update
+    //     if let Some(ticker) = self.tickers.get(&order.market_id) {
+    //         let event = MarketEvent::TickerUpdate(ticker.clone());
+    //         let channel = format!("ticker_events:{}", order.market_id);
+    //         let message = serde_json::to_string(&event).unwrap();
             
-            let _: Result<(), _> = conn.publish(channel, message).await;
-        }
+    //         let _: Result<(), _> = conn.publish(channel, message).await;
+    //     }
         
-        // Publish trade events
-        for trade in trades {
-            let event = MarketEvent::TradeUpdate(trade.clone());
-            let channel = format!("trade_events:{}", order.market_id);
-            let message = serde_json::to_string(&event).unwrap();
+    //     // Publish trade events
+    //     for trade in trades {
+    //         let event = MarketEvent::TradeUpdate(trade.clone());
+    //         let channel = format!("trade_events:{}", order.market_id);
+    //         let message = serde_json::to_string(&event).unwrap();
             
-            let _: Result<(), _> = conn.publish(channel, message).await;
-        }
+    //         let _: Result<(), _> = conn.publish(channel, message).await;
+    //     }
         
-        tracing::info!("📡 Published market events for {} trades", trades.len());
-    }
+    //     tracing::info!("📡 Published market events for {} trades", trades.len());
+    // }
     
     // KEEP THIS FUNCTION
     async fn take_snapshots(&mut self) {
@@ -910,27 +1008,27 @@ impl TradingEngine {
         Some(total_value / total_quantity)
     }
     
-    fn create_orderbook_snapshot(&self, orderbook: &OrderBook) -> OrderBookSnapshot {
-        let bids: Vec<(i64, i64)> = orderbook.bids.iter()
-            .map(|(&price, orders)| {
-                let total_quantity = orders.iter().map(|o| o.quantity - o.filled_quantity).sum();
-                (price, total_quantity)
-            })
-            .collect();
+    // fn create_orderbook_snapshot(&self, orderbook: &OrderBook) -> OrderBookSnapshot {
+    //     let bids: Vec<(i64, i64)> = orderbook.bids.iter()
+    //         .map(|(&price, orders)| {
+    //             let total_quantity = orders.iter().map(|o| o.quantity - o.filled_quantity).sum();
+    //             (price, total_quantity)
+    //         })
+    //         .collect();
             
-        let asks: Vec<(i64, i64)> = orderbook.asks.iter()
-            .map(|(&price, orders)| {
-                let total_quantity = orders.iter().map(|o| o.quantity - o.filled_quantity).sum();
-                (price, total_quantity)
-            })
-            .collect();
+    //     let asks: Vec<(i64, i64)> = orderbook.asks.iter()
+    //         .map(|(&price, orders)| {
+    //             let total_quantity = orders.iter().map(|o| o.quantity - o.filled_quantity).sum();
+    //             (price, total_quantity)
+    //         })
+    //         .collect();
             
-        OrderBookSnapshot {
-            bids,
-            asks,
-            timestamp: orderbook.last_updated,
-        }
-    }
+    //     OrderBookSnapshot {
+    //         bids,
+    //         asks,
+    //         timestamp: orderbook.last_updated,
+    //     }
+    // }
 
     /// 💰 Process balance requests (deposits, withdrawals, queries)
     pub async fn process_balance_request(
@@ -1379,10 +1477,28 @@ impl TradingEngine {
 
                 // Update order status
                 order.status = OrderStatus::Cancelled;
+                // unlock remaining reservation for LIMIT orders
+                let remaining = order.quantity - order.filled_quantity;
+                match order.order_type {
+                    OrderType::Buy => {
+                        if matches!(order.order_kind, OrderKind::Limit) {
+                            if let Some(price) = order.price {
+                                // unlock remaining quote = remaining * price
+                                let quote_id = self.markets[&order.market_id].quote_currency.id;
+                                self.unlock(order.user_id, quote_id, remaining * price).await;
+                            }
+                        }
+                    }
+                    OrderType::Sell => {
+                        if matches!(order.order_kind, OrderKind::Limit) {
+                            // unlock remaining base = remaining
+                            let base_id = self.markets[&order.market_id].base_currency.id;
+                            self.unlock(order.user_id, base_id, remaining).await;
+                        }
+                    }
+}
                 self.queue_db_updates(&order, &[], &[]).await;
-
-                self.publish_market_events(&order, &[]).await;
-                
+                self.publish_depth(req.market_id).await;
                 crate::redis_manager::OrderResponse {
                     request_id: req.request_id,
                     success: true,
@@ -1426,5 +1542,54 @@ impl TradingEngine {
             }
         }
         None
+    }
+    // Free = available - locked
+    fn free_amount(&self, user: Uuid, token: Uuid) -> i64 {
+        self.balances
+            .get(&user)
+            .and_then(|ub| ub.token_balances.get(&token))
+            .map(|tb| tb.available - tb.locked)
+            .unwrap_or(0)
+    }
+
+    // Try to lock funds: available unchanged, locked += amount
+    async fn lock(&mut self, user: Uuid, token: Uuid, amount: i64) -> Result<(), &'static str> {
+        if amount <= 0 { return Ok(()); }
+        if self.free_amount(user, token) < amount {
+            return Err("insufficient free balance to lock");
+        }
+        // locked += amount
+        self.update_user_balance(user, token, 0, amount).await;
+        Ok(())
+    }
+
+    // Unlock funds: locked -= amount (available unchanged)
+    async fn unlock(&mut self, user: Uuid, token: Uuid, amount: i64) {
+        if amount <= 0 { return; }
+        // locked -= amount
+        self.update_user_balance(user, token, 0, -amount).await;
+    }
+
+    // Spend function used on fills.
+    // Reduce total (available) by 'spend', and reduce locked by as much as is present (min(spend, locked))
+    // This supports both locked (limit) and unlocked (market) spends.
+    async fn spend_locked_or_available(&mut self, user: Uuid, token: Uuid, spend: i64) {
+        if spend <= 0 { return; }
+        let locked_now = {
+            self.balances
+                .get(&user)
+                .and_then(|ub| ub.token_balances.get(&token))
+                .map(|tb| tb.locked)
+                .unwrap_or(0)
+        };
+        let use_locked = locked_now.min(spend);
+        // available -= spend, locked -= use_locked
+        self.update_user_balance(user, token, -spend, -use_locked).await;
+    }
+
+    // Credit asset received on fills: available += amount
+    async fn credit(&mut self, user: Uuid, token: Uuid, amount: i64) {
+        if amount <= 0 { return; }
+        self.update_user_balance(user, token, amount, 0).await;
     }
 }
