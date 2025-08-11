@@ -3,50 +3,25 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8080";
+import { useAuth } from "@/store/auth";
 
 export default function LoginPage() {
   const router = useRouter();
+  const { login, loading, error } = useAuth();
   const [email, setEmail] = useState("");
   const [pw, setPw] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
 
   const canSubmit = email && pw && !loading;
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!canSubmit) return;
-    setErr(null);
-    setLoading(true);
+    
     try {
-      const res = await fetch(`${API_BASE}/login`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password: pw }),
-      });
-      if (!res.ok) {
-        const msg = await res.text();
-        throw new Error(msg || "Login failed");
-      }
-      // token may be raw string or { token: string }
-      let token: string | undefined;
-      const text = await res.text();
-      try {
-        const data = JSON.parse(text);
-        token = typeof data === "string" ? data : data?.token;
-      } catch {
-        token = text;
-      }
-      if (!token) throw new Error("Invalid login response");
-      // Persist and go to app
-      localStorage.setItem("authToken", token);
-      router.push("/user/markets");
+      await login(email, pw);
+      router.push("/exchange");
     } catch (e: any) {
-      setErr(e?.message || "Something went wrong");
-    } finally {
-      setLoading(false);
+      console.error(e);
     }
   }
 
@@ -99,9 +74,9 @@ export default function LoginPage() {
             />
           </label>
 
-          {err && (
+          {error && (
             <div className="mb-2 rounded-md border border-rose-500/30 bg-rose-500/10 p-2 text-sm text-rose-300">
-              {err}
+              {error}
             </div>
           )}
 

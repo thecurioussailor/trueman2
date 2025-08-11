@@ -3,43 +3,26 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8080";
+import { useAuth } from "@/store/auth";
 
 export default function SignupPage() {
   const router = useRouter();
   const [email, setEmail] = useState("");
   const [pw, setPw] = useState("");
   const [cpw, setCpw] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-  const [ok, setOk] = useState<string | null>(null);
-
-  const passwordsMatch = pw === cpw;
-  const canSubmit = email && pw.length >= 6 && passwordsMatch && !loading;
+  const { signup, loading, error } = useAuth();
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!canSubmit) return;
-    setErr(null);
-    setOk(null);
-    setLoading(true);
+    if (!email || !pw || !cpw) return;
     try {
-      const res = await fetch(`${API_BASE}/signup`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password: pw }),
-      });
-      if (!res.ok) {
-        const msg = await res.text();
-        throw new Error(msg || "Signup failed");
+      if (pw !== cpw) {
+        throw new Error("Passwords do not match");
       }
-      setOk("Account created. Redirecting to login…");
-      setTimeout(() => router.push("/login"), 1000);
+      await signup(email, pw);
+      router.push("/login");
     } catch (e: any) {
-      setErr(e?.message || "Something went wrong");
-    } finally {
-      setLoading(false);
+      console.error(e);
     }
   }
 
@@ -108,15 +91,11 @@ export default function SignupPage() {
             />
           </label>
 
-          {!passwordsMatch && cpw.length > 0 && (
-            <div className="mb-2 text-xs font-medium text-rose-400">Passwords do not match</div>
-          )}
-          {err && <div className="mb-2 rounded-md border border-rose-500/30 bg-rose-500/10 p-2 text-sm text-rose-300">{err}</div>}
-          {ok && <div className="mb-2 rounded-md border border-emerald-500/30 bg-emerald-500/10 p-2 text-sm text-emerald-300">{ok}</div>}
+          {error && <div className="mb-2 rounded-md border border-rose-500/30 bg-rose-500/10 p-2 text-sm text-rose-300">{error}</div>}
 
           <button
             type="submit"
-            disabled={!canSubmit}
+            disabled={loading}
             className="mt-3 inline-flex h-11 w-full items-center justify-center rounded-xl bg-gradient-to-r from-violet-500 to-cyan-400 px-5 text-sm font-bold text-black hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60"
           >
             {loading ? "Creating account…" : "Sign up"}
