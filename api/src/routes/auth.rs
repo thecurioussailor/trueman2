@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use diesel::prelude::*;
 use database::{establish_connection, NewUser, schema::users, User};
 use crate::jwt::create_jwt;
+use uuid::Uuid;
 
 #[derive(Deserialize, Serialize, Debug)]
 struct SignupRequest {
@@ -54,6 +55,7 @@ struct LoginRequest {
 
 #[derive(Serialize)]
 struct LoginResponse {
+    id: Uuid,
     message: String,
     email: String,
     token: String,
@@ -87,6 +89,7 @@ pub async fn login(body: Json<LoginRequest>) -> impl Responder {
 
     HttpResponse::Ok().json(LoginResponse {
         message: "Login successful".to_string(),
+        id: user.id,
         email: user.email,
         token,
     })
@@ -123,6 +126,7 @@ pub async fn admin_login(body: Json<LoginRequest>) -> impl Responder {
 
     HttpResponse::Ok().json(LoginResponse {
         message: "Admin login successful".to_string(),
+        id: user.id,
         email: user.email,
         token,
     })

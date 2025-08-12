@@ -11,7 +11,8 @@ use diesel::prelude::*;
 use database::{
     establish_connection,
     Order as DbOrder,
-    schema::orders::dsl as orders_dsl,
+    Market,
+    schema::{orders, markets},
 };
 
 #[derive(Deserialize, Debug)]
@@ -135,19 +136,48 @@ pub async fn get_orders(req: HttpRequest) -> impl Responder {
 
     let mut conn = establish_connection();
 
-    use orders_dsl::{orders as orders_table, user_id as user_id_col, created_at};
+    #[derive(Serialize)]
+    struct OrderWithMarket {
+        id: Uuid,
+        user_id: Uuid,
+        market: Market,
+        order_type: String,
+        order_kind: String,
+        price: Option<i64>,
+        quantity: i64,
+        filled_quantity: i64,
+        status: String,
+        created_at: chrono::NaiveDateTime,
+        updated_at: chrono::NaiveDateTime,
+    }
 
-    match orders_table
-        .filter(user_id_col.eq(user_id))
-        .order(created_at.desc())
-        .load::<DbOrder>(&mut conn)
-        {
-            Ok(orders) => {
-                HttpResponse::Ok().json(orders)
-            }
-            Err(e) => {
-                HttpResponse::InternalServerError().json(format!("Error fetching orders: {}", e))
-            }
+    let result = orders::table
+        .inner_join(markets::table.on(markets::id.eq(orders::market_id)))
+        .filter(orders::user_id.eq(user_id))
+        .select((DbOrder::as_select(), Market::as_select()))
+        .order(orders::created_at.desc())
+        .load::<(DbOrder, Market)>(&mut conn);
+
+    match result {
+        Ok(rows) => {
+            let data: Vec<OrderWithMarket> = rows
+                .into_iter()
+                .map(|(o, m)| OrderWithMarket {
+                    id: o.id,
+                    user_id: o.user_id,
+                    market: m,
+                    order_type: o.order_type,
+                    order_kind: o.order_kind,
+                    price: o.price,
+                    quantity: o.quantity,
+                    filled_quantity: o.filled_quantity,
+                    status: o.status,
+                    created_at: o.created_at,
+                    updated_at: o.updated_at,
+                })
+                .collect();
+            HttpResponse::Ok().json(data)
         }
-
+        Err(e) => HttpResponse::InternalServerError().json(format!("Error fetching orders: {}", e)),
+    }
 }

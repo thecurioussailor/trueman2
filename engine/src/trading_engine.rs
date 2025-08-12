@@ -44,6 +44,12 @@ pub struct Trade {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Reservation {
+    pub token_id: Uuid,
+    pub amount: i64
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderBook {
     pub market_id: Uuid,
     pub bids: BTreeMap<i64, VecDeque<Order>>, // Price -> Orders (descending)
@@ -192,67 +198,54 @@ impl TradingEngine {
             }
         };
 
-        // For resting limit orders: lock upfront
-        if matches!(order.order_kind, OrderKind::Limit) {
-            match order.order_type {
-                OrderType::Buy => {
-                    let price = order.price.ok_or_else(|| {
-                        tracing::warn!("❌ Limit buy without price");
-                    });
-                    if order.price.is_none() {
-                        return crate::redis_manager::OrderResponse {
-                            request_id: order_request.request_id, success: false, status: "REJECTED".to_string(),
-                            order_id: None, message: "Limit buy requires price".to_string(),
-                            filled_quantity: None, remaining_quantity: None, average_price: None, trades: None
-                        };
-                    }
-                    let need = order.price.unwrap() * order.quantity;
-                    if let Err(e) = self.lock(order.user_id, market.quote_currency.id, need).await {
-                        tracing::warn!("❌ Order rejected: {}", e);
-                        return crate::redis_manager::OrderResponse {
-                            request_id: order_request.request_id, success: false, status: "REJECTED".to_string(),
-                            order_id: None, message: e.to_string(), filled_quantity: None, remaining_quantity: None,
-                            average_price: None, trades: None
-                        };
-                    }
-                }
-                OrderType::Sell => {
-                    if let Err(e) = self.lock(order.user_id, market.base_currency.id, order.quantity).await {
-                        tracing::warn!("❌ Order rejected: {}", e);
-                        return crate::redis_manager::OrderResponse {
-                            request_id: order_request.request_id, success: false, status: "REJECTED".to_string(),
-                            order_id: None, message: e.to_string(), filled_quantity: None, remaining_quantity: None,
-                            average_price: None, trades: None
-                        };
-                    }
-                }
+        // 2. Validate balances (now we have balance data!)
+        let reservation = match self.validate_and_lock_order_balance(&order).await {
+            Ok(reservation) => reservation,
+            Err(msg) => {
+                return crate::redis_manager::OrderResponse {
+                    request_id: order_request.request_id,
+                    success: false,
+                    status: "REJECTED".to_string(),
+                    order_id: None,
+                    message: msg,
+                    filled_quantity: None,
+                    remaining_quantity: None,
+                    average_price: None,
+                    trades: None,
+                };
             }
-        }
-
-        // // 2. Validate balances (now we have balance data!)
-        // if !self.validate_order_balance(&order) {
-        //     tracing::warn!("❌ Order rejected: Insufficient balance");
-        //     return crate::redis_manager::OrderResponse {
-        //         request_id: order_request.request_id,
-        //         success: false,
-        //         status: "REJECTED".to_string(),
-        //         order_id: None,
-        //         message: "Insufficient balance".to_string(),
-        //         filled_quantity: None,
-        //         remaining_quantity: None,
-        //         average_price: None,
-        //         trades: None,
-        //     };
-        // }
+        };
 
         self.queue_order_created(&order).await;
         // 3. Execute matching in memory
         let (updated_order, matched_orders, trades) = self.match_order(order).await;
         println!("Trades: {:?}, Orders: {:?}", trades, updated_order);
         
+        if matches!(updated_order.order_kind, OrderKind::Market) {
+            match updated_order.order_type {
+                OrderType::Buy => {
+                    let executed_cost: i64 = trades.iter().map(|t| t.price * t.quantity).sum();
+                    if reservation.token_id == self.markets.get(&updated_order.market_id).unwrap().quote_currency.id {
+                        let refund = reservation.amount.saturating_sub(executed_cost);
+                        if refund > 0 {
+                            self.unlock(updated_order.user_id, reservation.token_id, refund).await;
+                        }
+                    }
+                }
+                OrderType::Sell => {
+                    let remaining = updated_order.quantity - updated_order.filled_quantity;
+                    if remaining > 0 && reservation.token_id == self.markets.get(&updated_order.market_id).unwrap().base_currency.id {
+                        self.unlock(updated_order.user_id, reservation.token_id, remaining).await;
+                    }
+                }
+            }
+        }
+
         let market_id = updated_order.market_id;
+        println!("Publishing depth for market {}", market_id);
         self.publish_depth(market_id).await;
         if !trades.is_empty() {
+            self.publish_depth(market_id).await;
             self.publish_trades(market_id, &trades).await;   // new trades
             self.publish_ticker(market_id).await;            // last price from trades
         }
@@ -359,6 +352,7 @@ impl TradingEngine {
     }
 
     async fn publish_depth(&mut self, market_id: Uuid) {
+        println!("Publishing depth for market {}", market_id);
         if let Some((bids, asks)) = self.build_depth(market_id, 50) { // top 50
             let seq = self.depth_seq.entry(market_id).and_modify(|s| *s += 1).or_insert(1);
             let update = DepthUpdate {
@@ -680,12 +674,29 @@ impl TradingEngine {
             let cost = trade.price * trade.quantity;
 
             // Buyer: spend quote (locked if resting limit or immediate if market), credit base
-            self.spend_locked_or_available(buyer_id, quote_id, cost).await;
-            self.credit(buyer_id, base_id, trade.quantity).await;
+            let buyer_qoute_locked_now = self.balances.get(&buyer_id)
+                .and_then(|ub| ub.token_balances.get(&quote_id))
+                .map(|tb| tb.locked)
+                .unwrap_or(0);
+
+            let buyer_use_locked = buyer_qoute_locked_now.min(cost);
+
+            self.update_user_balance(buyer_id, quote_id, 0, -buyer_use_locked).await;
+            self.update_user_balance(buyer_id, base_id, trade.quantity, 0).await;
 
             // Seller: spend base (locked if resting limit), credit quote
-            self.spend_locked_or_available(seller_id, base_id, trade.quantity).await;
-            self.credit(seller_id, quote_id, cost).await;
+
+            let seller_base_locked_now = self.balances
+                .get(&seller_id)
+                .and_then(|ub| ub.token_balances.get(&base_id))
+                .map(|tb| tb.locked)
+                .unwrap_or(0);
+
+            let seller_use_locked = seller_base_locked_now.min(trade.quantity);
+
+            self.update_user_balance(seller_id, base_id, 0, -seller_use_locked).await;
+            self.update_user_balance(seller_id, quote_id, cost, 0).await;
+            
 
             tracing::info!("💰 Updated balances for trade: {} {} @ {} between users {} and {}", 
                 trade.quantity, 
@@ -1078,7 +1089,7 @@ impl TradingEngine {
             request.user_id, 
             request.token_id, 
             request.amount, 
-            locked_amount
+            0
         ).await;
         
         let new_balance = {
@@ -1319,105 +1330,212 @@ impl TradingEngine {
     }
 
     // Enhanced balance validation with token symbols for better logging
-    fn validate_order_balance(&self, order: &Order) -> bool {
-        // Get market information
-        let market = match self.markets.get(&order.market_id) {
-            Some(market) => market,
-            None => {
-                tracing::error!("❌ Market not found: {}", order.market_id);
-                return false;
-            }
-        };
+    // async fn validate_order_balance(&self, order: &Order) -> bool {
+    //     // Get market information
+    //     let market = match self.markets.get(&order.market_id) {
+    //         Some(market) => market,
+    //         None => {
+    //             tracing::error!("❌ Market not found: {}", order.market_id);
+    //             return false;
+    //         }
+    //     };
         
-        // Get user balance
-        let user_balance = match self.balances.get(&order.user_id) {
-            Some(balance) => balance,
-            None => {
-                tracing::warn!("❌ No balance found for user: {} in market {}", 
-                    order.user_id, market.symbol);
-                return false;
-            }
-        };
+    //     // Get user balance
+    //     let user_balance = match self.balances.get(&order.user_id) {
+    //         Some(balance) => balance,
+    //         None => {
+    //             tracing::warn!("❌ No balance found for user: {} in market {}", 
+    //                 order.user_id, market.symbol);
+    //             return false;
+    //         }
+    //     };
+
+    //     // For resting limit orders: lock upfront
+    //     if matches!(order.order_kind, OrderKind::Limit) {
+    //         match order.order_type {
+    //             OrderType::Buy => {
+    //                 let price = order.price.ok_or_else(|| {
+    //                     tracing::warn!("❌ Limit buy without price");
+    //                 });
+    //                 if order.price.is_none() {
+    //                     return crate::redis_manager::OrderResponse {
+    //                         request_id: order_request.request_id, success: false, status: "REJECTED".to_string(),
+    //                         order_id: None, message: "Limit buy requires price".to_string(),
+    //                         filled_quantity: None, remaining_quantity: None, average_price: None, trades: None
+    //                     };
+    //                 }
+    //                 let need = order.price.unwrap() * order.quantity;
+    //                 if let Err(e) = self.lock(order.user_id, market.quote_currency.id, need).await {
+    //                     tracing::warn!("❌ Order rejected: {}", e);
+    //                     return crate::redis_manager::OrderResponse {
+    //                         request_id: order_request.request_id, success: false, status: "REJECTED".to_string(),
+    //                         order_id: None, message: e.to_string(), filled_quantity: None, remaining_quantity: None,
+    //                         average_price: None, trades: None
+    //                     };
+    //                 }
+    //             }
+    //             OrderType::Sell => {
+    //                 if let Err(e) = self.lock(order.user_id, market.base_currency.id, order.quantity).await {
+    //                     tracing::warn!("❌ Order rejected: {}", e);
+    //                     return crate::redis_manager::OrderResponse {
+    //                         request_id: order_request.request_id, success: false, status: "REJECTED".to_string(),
+    //                         order_id: None, message: e.to_string(), filled_quantity: None, remaining_quantity: None,
+    //                         average_price: None, trades: None
+    //                     };
+    //                 }
+    //             }
+    //         }
+    //     }
         
+    //     match order.order_type {
+    //         OrderType::Buy => {
+    //             // For buy orders, user needs sufficient quote currency (usually USDC)
+    //             let required_token_id = market.quote_currency.id;
+    //             let required_amount = match order.price {
+    //                 Some(price) => price * order.quantity,
+    //                 None => {
+    //                     // Market order - estimate against current best ask price
+    //                     let estimated_price = self.estimate_market_buy_price(order.market_id, order.quantity);
+    //                     match estimated_price {
+    //                         Some(price) => price * order.quantity,
+    //                         None => {
+    //                             tracing::warn!("❌ No liquidity available for market buy in {} market", 
+    //                                 market.symbol);
+    //                             return false;
+    //                         }
+    //                     }
+    //                 }
+    //             };
+                
+    //             if let Some(token_balance) = user_balance.token_balances.get(&required_token_id) {
+    //                 let has_sufficient = token_balance.available >= required_amount;
+    //                 if !has_sufficient {
+    //                     tracing::warn!(
+    //                         "❌ Insufficient {} balance for BUY order in {} market. Required: {}, Available: {}", 
+    //                         market.quote_currency.symbol,
+    //                         market.symbol,
+    //                         required_amount, 
+    //                         token_balance.available
+    //                     );
+    //                 } else {
+    //                     tracing::info!(
+    //                         "✅ Sufficient {} balance for BUY order in {} market. Required: {}, Available: {}", 
+    //                         market.quote_currency.symbol,
+    //                         market.symbol,
+    //                         required_amount, 
+    //                         token_balance.available
+    //                     );
+    //                 }
+    //                 has_sufficient
+    //             } else {
+    //                 tracing::warn!("❌ No {} balance found for user in {} market", 
+    //                     market.quote_currency.symbol, market.symbol);
+    //                 false
+    //             }
+    //         }
+    //         OrderType::Sell => {
+    //             // For sell orders, user needs sufficient base currency (SOL/BTC/ETH)
+    //             let required_token_id = market.base_currency.id;
+    //             let required_amount = order.quantity;
+                
+    //             if let Some(token_balance) = user_balance.token_balances.get(&required_token_id) {
+    //                 let has_sufficient = token_balance.available >= required_amount;
+    //                 if !has_sufficient {
+    //                     tracing::warn!(
+    //                         "❌ Insufficient {} balance for SELL order in {} market. Required: {}, Available: {}", 
+    //                         market.base_currency.symbol,
+    //                         market.symbol,
+    //                         required_amount, 
+    //                         token_balance.available
+    //                     );
+    //                 } else {
+    //                     tracing::info!(
+    //                         "✅ Sufficient {} balance for SELL order in {} market. Required: {}, Available: {}", 
+    //                         market.base_currency.symbol,
+    //                         market.symbol,
+    //                         required_amount, 
+    //                         token_balance.available
+    //                     );
+    //                 }
+    //                 has_sufficient
+    //             } else {
+    //                 tracing::warn!("❌ No {} balance found for user in {} market", 
+    //                     market.base_currency.symbol, market.symbol);
+    //                 false
+    //             }
+    //         }
+    //     }
+    // }
+    
+    
+
+    async fn validate_and_lock_order_balance(&mut self, order: &Order) -> Result<Reservation, String> {
+        // Market
+        let market = self.markets.get(&order.market_id)
+            .ok_or_else(|| format!("Market not found: {}", order.market_id))?
+            .clone();
+
+        // User balance presence
+        let user_balance = self.balances.get(&order.user_id)
+            .ok_or_else(|| format!("No balance found for user: {}", order.user_id))?;
+
         match order.order_type {
             OrderType::Buy => {
-                // For buy orders, user needs sufficient quote currency (usually USDC)
-                let required_token_id = market.quote_currency.id;
-                let required_amount = match order.price {
-                    Some(price) => price * order.quantity,
-                    None => {
-                        // Market order - estimate against current best ask price
-                        let estimated_price = self.estimate_market_buy_price(order.market_id, order.quantity);
-                        match estimated_price {
-                            Some(price) => price * order.quantity,
-                            None => {
-                                tracing::warn!("❌ No liquidity available for market buy in {} market", 
-                                    market.symbol);
-                                return false;
-                            }
-                        }
+                // Determine required quote amount
+                let required_quote = match order.order_kind {
+                    OrderKind::Limit => {
+                        let price = order.price.ok_or_else(|| "Limit buy requires price".to_string())?;
+                        price * order.quantity
+                    }
+                    OrderKind::Market => {
+                        // Estimate cost for market buy; if no liquidity, reject
+                        let est = self.estimate_market_buy_price(order.market_id, order.quantity)
+                            .ok_or_else(|| format!("No liquidity available for market buy in {}", market.symbol))?;
+                        est * order.quantity
                     }
                 };
-                
-                if let Some(token_balance) = user_balance.token_balances.get(&required_token_id) {
-                    let has_sufficient = token_balance.available >= required_amount;
-                    if !has_sufficient {
-                        tracing::warn!(
-                            "❌ Insufficient {} balance for BUY order in {} market. Required: {}, Available: {}", 
-                            market.quote_currency.symbol,
-                            market.symbol,
-                            required_amount, 
-                            token_balance.available
-                        );
-                    } else {
-                        tracing::info!(
-                            "✅ Sufficient {} balance for BUY order in {} market. Required: {}, Available: {}", 
-                            market.quote_currency.symbol,
-                            market.symbol,
-                            required_amount, 
-                            token_balance.available
-                        );
-                    }
-                    has_sufficient
-                } else {
-                    tracing::warn!("❌ No {} balance found for user in {} market", 
-                        market.quote_currency.symbol, market.symbol);
-                    false
+
+                // Check available quote balance
+                let quote_id = market.quote_currency.id;
+                let has = user_balance.token_balances.get(&quote_id).map(|b| b.available).unwrap_or(0);
+                if has < required_quote {
+                    return Err(format!(
+                        "Insufficient {} balance for BUY in {}. Required: {}, Available: {}",
+                        market.quote_currency.symbol, market.symbol, required_quote, has
+                    ));
                 }
+
+                // Lock quote
+                self.lock(order.user_id, quote_id, required_quote).await
+                    .map_err(|e| e.to_string())?;
+
+                Ok(Reservation { token_id: quote_id, amount: required_quote })
             }
+
             OrderType::Sell => {
-                // For sell orders, user needs sufficient base currency (SOL/BTC/ETH)
-                let required_token_id = market.base_currency.id;
-                let required_amount = order.quantity;
-                
-                if let Some(token_balance) = user_balance.token_balances.get(&required_token_id) {
-                    let has_sufficient = token_balance.available >= required_amount;
-                    if !has_sufficient {
-                        tracing::warn!(
-                            "❌ Insufficient {} balance for SELL order in {} market. Required: {}, Available: {}", 
-                            market.base_currency.symbol,
-                            market.symbol,
-                            required_amount, 
-                            token_balance.available
-                        );
-                    } else {
-                        tracing::info!(
-                            "✅ Sufficient {} balance for SELL order in {} market. Required: {}, Available: {}", 
-                            market.base_currency.symbol,
-                            market.symbol,
-                            required_amount, 
-                            token_balance.available
-                        );
-                    }
-                    has_sufficient
-                } else {
-                    tracing::warn!("❌ No {} balance found for user in {} market", 
-                        market.base_currency.symbol, market.symbol);
-                    false
+                // Determine required base amount
+                let required_base = match order.order_kind {
+                    OrderKind::Limit | OrderKind::Market => order.quantity,
+                };
+
+                let base_id = market.base_currency.id;
+                let has = user_balance.token_balances.get(&base_id).map(|b| b.available).unwrap_or(0);
+                if has < required_base {
+                    return Err(format!(
+                        "Insufficient {} balance for SELL in {}. Required: {}, Available: {}",
+                        market.base_currency.symbol, market.symbol, required_base, has
+                    ));
                 }
+
+                // Lock base
+                self.lock(order.user_id, base_id, required_base).await
+                    .map_err(|e| e.to_string())?;
+
+                Ok(Reservation { token_id: base_id, amount: required_base })
             }
         }
     }
+    //KEEP THIS FUNCTION
     fn estimate_market_buy_price(&self, market_id: Uuid, quantity: i64) -> Option<i64> {
         let orderbook = self.orderbooks.get(&market_id)?;
         let mut remaining_quantity = quantity;
@@ -1548,7 +1666,7 @@ impl TradingEngine {
         self.balances
             .get(&user)
             .and_then(|ub| ub.token_balances.get(&token))
-            .map(|tb| tb.available - tb.locked)
+            .map(|tb| tb.available)
             .unwrap_or(0)
     }
 
@@ -1559,7 +1677,7 @@ impl TradingEngine {
             return Err("insufficient free balance to lock");
         }
         // locked += amount
-        self.update_user_balance(user, token, 0, amount).await;
+        self.update_user_balance(user, token, -amount, amount).await;
         Ok(())
     }
 
@@ -1567,29 +1685,6 @@ impl TradingEngine {
     async fn unlock(&mut self, user: Uuid, token: Uuid, amount: i64) {
         if amount <= 0 { return; }
         // locked -= amount
-        self.update_user_balance(user, token, 0, -amount).await;
-    }
-
-    // Spend function used on fills.
-    // Reduce total (available) by 'spend', and reduce locked by as much as is present (min(spend, locked))
-    // This supports both locked (limit) and unlocked (market) spends.
-    async fn spend_locked_or_available(&mut self, user: Uuid, token: Uuid, spend: i64) {
-        if spend <= 0 { return; }
-        let locked_now = {
-            self.balances
-                .get(&user)
-                .and_then(|ub| ub.token_balances.get(&token))
-                .map(|tb| tb.locked)
-                .unwrap_or(0)
-        };
-        let use_locked = locked_now.min(spend);
-        // available -= spend, locked -= use_locked
-        self.update_user_balance(user, token, -spend, -use_locked).await;
-    }
-
-    // Credit asset received on fills: available += amount
-    async fn credit(&mut self, user: Uuid, token: Uuid, amount: i64) {
-        if amount <= 0 { return; }
-        self.update_user_balance(user, token, amount, 0).await;
+        self.update_user_balance(user, token, amount, -amount).await;
     }
 }

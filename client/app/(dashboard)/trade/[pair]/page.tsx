@@ -1,14 +1,18 @@
 "use client";
-
-import { notFound, useParams } from "next/navigation";
-import { useState } from "react";
+import { notFound, useParams, useSearchParams } from "next/navigation";
+import { useState, useEffect, useMemo } from "react";
+import { useMarketFeedStore } from "@/store/marketFeed";
 import Ticker from "@/components/trade/Ticker";
 import RecentTrades from "@/components/trade/RecentTrades";
 import OrderForm from "@/components/trade/OrderForm";
 import BookTrades from "@/components/trade/BookTrades";
+import OrderHistory from "@/components/trade/OrderHistory";
 
 export default function TradePairPage() {
     const { pair } = useParams();
+    const search = useSearchParams();
+    const marketId = useMemo(() => search.get("id"), [search]); 
+
     const slug = pair?.toString().toLowerCase() || "";
     const parts = slug.split("-");
     if (parts.length !== 2) return notFound();
@@ -17,6 +21,14 @@ export default function TradePairPage() {
     const quote = parts[1].toUpperCase();
     const symbol = `${base}/${quote}`;
 
+    const [bottomTab, setBottomTab] = useState<"recent" | "history">("recent");
+
+    useEffect(() => {
+      if (!marketId) return;
+      useMarketFeedStore.getState().subscribeMarket(marketId);
+    }, [marketId]);
+  
+
   return (
     <main className="min-h-screen bg-[#0b0f14] text-zinc-100">
       {/* BG */}
@@ -24,8 +36,7 @@ export default function TradePairPage() {
         <div className="absolute -top-40 -left-32 h-[42rem] w-[42rem] rounded-full blur-3xl bg-gradient-to-br from-violet-600/30 to-cyan-400/20" />
         <div className="absolute -top-32 right-0 h-[36rem] w-[36rem] rounded-full blur-3xl bg-gradient-to-tr from-cyan-400/20 to-violet-600/20" />
       </div>
-      <Ticker symbol={symbol} />
-
+      <Ticker symbol={symbol} marketId={marketId || ""} />
       {/* Main grid: 4 columns on lg - chart(2) / book(1) / order(1) */}
       <div className="mx-auto grid max-w-7xl grid-cols-1 gap-4 px-4 py-4 lg:grid-cols-4">
         {/* Chart + tabs */}
@@ -41,11 +52,35 @@ export default function TradePairPage() {
 
         {/* Order form */}
         <section className="rounded-xl border border-white/10 bg-white/5 p-3">
-          <OrderForm base={base} quote={quote} midPrice={177.78} />
+          <OrderForm base={base} quote={quote} midPrice={177.78} marketId={marketId || ""} />
         </section>
 
         {/* Bottom: Recent trades spanning all */}
-        <RecentTrades />
+        <div className="lg:col-span-4">
+          <div className="mb-2 flex items-center gap-2">
+            <button
+              onClick={() => setBottomTab("recent")}
+              className={`rounded-lg px-3 py-1.5 text-sm ${
+                bottomTab === "recent"
+                  ? "bg-white/10 border border-white/15"
+                  : "text-zinc-300 hover:bg-white/5"
+              }`}
+            >
+              Recent Trades
+            </button>
+            <button
+              onClick={() => setBottomTab("history")}
+              className={`rounded-lg px-3 py-1.5 text-sm ${
+                bottomTab === "history"
+                  ? "bg-white/10 border border-white/15"
+                  : "text-zinc-300 hover:bg-white/5"
+              }`}
+            >
+              Order History
+            </button>
+          </div>
+          {bottomTab === "recent" ? <RecentTrades /> : <OrderHistory />}
+        </div>
       </div>
     </main>
   );
@@ -67,19 +102,5 @@ function Tabs({ tabs }: { tabs: string[] }) {
         </button>
       ))}
     </div>
-  );
-}
-
-function Logo() {
-  return (
-    <svg width="22" height="22" viewBox="0 0 24 24" aria-hidden className="block">
-      <defs>
-        <linearGradient id="gx" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0%" stopColor="#7C3AED" />
-          <stop offset="100%" stopColor="#06B6D4" />
-        </linearGradient>
-      </defs>
-      <path fill="url(#gx)" d="M12 2l9 5v10l-9 5-9-5V7l9-5zm0 2.2L5 7v8l7 3.8L19 15V7l-7-2.8z" />
-    </svg>
   );
 }

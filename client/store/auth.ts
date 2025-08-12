@@ -5,6 +5,7 @@ import { api } from "@/lib/http";
 
 type AuthState = {
     token: string | null;
+    id: string | null;
     email: string | null;
     isAdmin: boolean;
     loading: boolean;
@@ -18,6 +19,7 @@ type AuthState = {
     persist(
       (set, get) => ({
         token: null,
+        id: null,
         email: null,
         isAdmin: false,
         loading: false,
@@ -38,9 +40,10 @@ type AuthState = {
         login: async (email, password, admin = false) => {
           set({ loading: true, error: null });
           try {
-            const { data } = await api.post<{ token: string; email: string }>(admin ? "/admin/login" : "/login", { email, password });
+            const { data } = await api.post<{ token: string; email: string, id: string }>(admin ? "/admin/login" : "/login", { email, password });
             localStorage.setItem("authToken", data.token);
-            set({ token: data.token, email: data.email, isAdmin: !!admin });
+            set({ token: data.token, email: data.email, isAdmin: !!admin, id: data.id.toString() });
+            console.log(data);
           } catch (e: any) {
             set({ error: e?.message || "Login failed" });
             throw e;

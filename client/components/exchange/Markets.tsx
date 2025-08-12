@@ -1,4 +1,6 @@
 import Link from "next/link";
+import { useEffect } from "react";
+import { useMarkets } from "@/store/markets";
 
 type Market = {
     symbol: string;    // e.g. "SOL/USDC"
@@ -13,6 +15,12 @@ type Market = {
     { symbol: "SOL/USDC", price: "168.02", change24h: "+5.1%", volume24h: "2,340,100 SOL" },
   ];
 const Markets = () => {
+  const { markets, loading, error, fetchPublic } = useMarkets();
+
+  useEffect(() => {
+    fetchPublic();
+  }, [fetchPublic]);
+
   return (
     <div className="mx-auto max-w-7xl px-4 py-6">
 
@@ -29,19 +37,29 @@ const Markets = () => {
               </tr>
             </thead>
             <tbody>
-              {MOCK_MARKETS.map((m) => {
-                const pos = m.change24h.startsWith("+");
+            {loading && (
+              <tr>
+                <td className="px-4 py-8 text-center text-zinc-400" colSpan={5}>
+                  Loading markets...
+                </td>
+              </tr>
+            )}
+            {!loading &&
+              markets.map((m) => {
+                // Public markets API does not include price/change/volume; placeholders for now
+                const symbolDisplay = m.symbol.replace("-", "/");
                 return (
-                  <tr key={m.symbol} className="border-t border-white/10">
-                    <td className="px-4 py-3 font-semibold">{m.symbol}</td>
-                    <td className="px-4 py-3">${m.price}</td>
-                    <td className={`px-4 py-3 font-semibold ${pos ? "text-emerald-400" : "text-rose-400"}`}>
-                      {m.change24h}
-                    </td>
-                    <td className="px-4 py-3">{m.volume24h}</td>
+                  <tr key={m.id} className="border-t border-white/10">
+                    <td className="px-4 py-3 font-semibold">{symbolDisplay}</td>
+                    <td className="px-4 py-3">-</td>
+                    <td className="px-4 py-3">-</td>
+                    <td className="px-4 py-3">-</td>
                     <td className="px-4 py-3 text-right">
                       <Link
-                        href={`/trade/${m.symbol.replace("/", "-")}`}
+                        href={{
+                          pathname: `/trade/${m.symbol}`,
+                          query: { id: m.id },
+                        }}
                         className="inline-flex h-8 items-center rounded-lg border border-white/10 bg-white/5 px-3 text-xs font-semibold hover:bg-white/10"
                       >
                         Open
@@ -50,13 +68,13 @@ const Markets = () => {
                   </tr>
                 );
               })}
-              {MOCK_MARKETS.length === 0 && (
-                <tr>
-                  <td className="px-4 py-8 text-center text-zinc-400" colSpan={5}>
-                    No markets found
-                  </td>
-                </tr>
-              )}
+            {!loading && markets.length === 0 && (
+              <tr>
+                <td className="px-4 py-8 text-center text-zinc-400" colSpan={5}>
+                  No markets found
+                </td>
+              </tr>
+            )}
             </tbody>
           </table>
         </div>

@@ -1,14 +1,29 @@
+"use client";
 import { useState } from "react";
-
-export default function OrderForm({ base, quote, midPrice }: { base: string; quote: string; midPrice: number }) {
+import { useOrders } from "@/store/order";
+export default function OrderForm({ base, quote, midPrice, marketId }: { base: string; quote: string; midPrice: number, marketId: string }) {
+    
     const [side, setSide] = useState<"buy" | "sell">("buy");
-    const [kind, setKind] = useState<"Limit" | "Market" | "Conditional">("Limit");
+    const [kind, setKind] = useState<"Limit" | "Market">("Limit");
     const [price, setPrice] = useState(midPrice.toFixed(2));
     const [qty, setQty] = useState("");
     const [postOnly, setPostOnly] = useState(false);
     const [ioc, setIoc] = useState(false);
     const [margin, setMargin] = useState(false);
+
+    const { create, loading, error } = useOrders();
   
+    const submit = async () => {
+      if (!marketId || !qty) return;
+      const order_type = side === "buy" ? "Buy" : "Sell";
+      const order_kind = kind === "Market" ? "Market" : "Limit";
+      const p = order_kind === "Market" ? null : Number(price || 0);
+      const q = Number(qty);
+      // TODO: convert p and q to engine integer units if needed (based on market tick_size/min_order_size)
+      await create({ market_id: marketId, order_type, order_kind, price: p, quantity: q });
+      setQty("");
+    };
+
     const btnClass =
       side === "buy"
         ? "bg-emerald-600 hover:bg-emerald-500"
@@ -38,7 +53,7 @@ export default function OrderForm({ base, quote, midPrice }: { base: string; quo
         </div>
   
         <div className="mb-3 flex items-center gap-2">
-          {(["Limit", "Market", "Conditional"] as const).map((k) => (
+          {(["Limit", "Market"] as const).map((k) => (
             <button
               key={k}
               onClick={() => setKind(k)}
@@ -76,8 +91,12 @@ export default function OrderForm({ base, quote, midPrice }: { base: string; quo
             </div>
           </div>
   
-          <button className={`mt-1 w-full rounded-lg px-3 py-2 font-semibold text-black ${btnClass}`}>
-            {sideTitle}
+          <button 
+            className={`mt-1 w-full rounded-lg px-3 py-2 font-semibold text-black ${btnClass}`}
+          onClick={submit}
+          disabled={loading}
+          >
+            {loading ? "Placing..." : sideTitle}
           </button>
   
           <div className="mt-2 grid grid-cols-3 gap-2 text-xs text-zinc-300">
