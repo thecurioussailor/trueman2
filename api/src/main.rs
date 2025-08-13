@@ -14,6 +14,7 @@ use routes::{
     balance::{get_user_balance, deposit_funds, withdraw_funds},
     order::{create_order, cancel_order, get_orders},
     trade::get_trades,
+    simulator::start_simulator,
 };
 use routes::test::{get_user_profile, admin_dashboard};
 use jwt::{admin_auth, user_auth};
@@ -41,6 +42,7 @@ async fn main() -> std::io::Result<()> {
                             .service(cancel_order)
                             .service(get_orders)
                             .service(get_trades)
+                            .service(start_simulator)
             )
             .service(
                 web::scope("/admin")
