@@ -16,6 +16,8 @@ import {
 import { CgProfile } from "react-icons/cg";
 import { useAuth } from "@/store/auth";
 import { useRouter } from "next/navigation";
+import jim from "@/public/jim-carrey.svg";
+import { IoSearch } from "react-icons/io5";
 type Market = {
     symbol: string;    // e.g. "SOL/USDC"
     price: string;     // e.g. "168.24"
@@ -53,9 +55,7 @@ const Navbar = () => {
       {/* Middle: Search + Spot pill */}
       <div className="mx-3 flex flex-1 items-center gap-3">
         <div className="hidden items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-3 py-2 md:flex md:min-w-[340px]">
-          <svg width="16" height="16" viewBox="0 0 24 24" className="text-zinc-400">
-            <path fill="currentColor" d="M10 18a8 8 0 1 1 5.293-14.293L22 0l2 2l-6.707 6.707A8 8 0 0 1 10 18m0-2a6 6 0 1 0 0-12a6 6 0 0 0 0 12" />
-          </svg>
+          <IoSearch />
           <input
             value={q}
             onChange={(e) => setQ(e.target.value)}

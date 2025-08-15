@@ -2,7 +2,6 @@ import { useMarketFeedStore } from "@/store/marketFeed";
 
 const Ticker = ({ symbol, marketId }: { symbol: string, marketId: string }) => {
   const ticker = useMarketFeedStore(s => s.tickerByMarket[marketId]);
-  if (!ticker) return <div>Loading...</div>;
   return (
     <section className="border-b border-white/10 bg-black/20">
     <div className="mx-auto grid max-w-7xl grid-cols-1 gap-3 px-4 py-3 md:grid-cols-5">
@@ -12,10 +11,10 @@ const Ticker = ({ symbol, marketId }: { symbol: string, marketId: string }) => {
           <span className="text-sm font-semibold">{symbol}</span>
         </div>
       </div>
-      <Metric label="Price" value={ticker.last_price.toFixed(2)} />
-      <Metric label="24H Change" value={`${ticker.change_24h.toFixed(2)}%`} pos={ticker.change_24h > 0} />
-      <Metric label="24H High / Low" value={`${ticker.high_24h.toFixed(2)} / ${ticker.low_24h.toFixed(2)}`} />
-      <Metric label="24H Volume" value={ticker.volume_24h.toLocaleString()} />
+      <Metric label="Price" value={ticker?.last_price.toFixed(2)} />
+      <Metric label="24H Change" value={`${ticker?.change_24h.toFixed(2)}%`} pos={ticker?.change_24h > 0} />
+      <Metric label="24H High / Low" value={`${ticker?.high_24h.toFixed(2)} / ${ticker?.low_24h.toFixed(2)}`} />
+      <Metric label="24H Volume" value={ticker?.volume_24h.toLocaleString()} />
     </div>
   </section>
   )

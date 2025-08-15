@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { useAuth } from "@/store/auth";
+import { toast } from "sonner";
 
 export default function SignupPage() {
   const router = useRouter();
@@ -20,9 +21,12 @@ export default function SignupPage() {
         throw new Error("Passwords do not match");
       }
       await signup(email, pw);
+      toast("Account created successfully");
       router.push("/login");
     } catch (e: any) {
-      console.error(e);
+      toast("Failed to create account", {
+        description: e.message,
+      });
     }
   }
 

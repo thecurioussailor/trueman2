@@ -1,18 +1,16 @@
 "use client";
 import { useState } from "react";
 import { useOrders } from "@/store/order";
-export default function OrderForm({ base, quote, midPrice, marketId }: { base: string; quote: string; midPrice: number, marketId: string }) {
+import { useMarketFeedStore } from "@/store/marketFeed";
+export default function OrderForm({ base, quote, marketId }: { base: string; quote: string; marketId: string }) {
     
     const [side, setSide] = useState<"buy" | "sell">("buy");
     const [kind, setKind] = useState<"Limit" | "Market">("Limit");
-    const [price, setPrice] = useState(midPrice.toFixed(2));
+    const [price, setPrice] = useState("");
     const [qty, setQty] = useState("");
-    const [postOnly, setPostOnly] = useState(false);
-    const [ioc, setIoc] = useState(false);
-    const [margin, setMargin] = useState(false);
 
     const { create, loading, error } = useOrders();
-  
+    const ticker = useMarketFeedStore(s => s.tickerByMarket[marketId]);
     const submit = async () => {
       if (!marketId || !qty) return;
       const order_type = side === "buy" ? "Buy" : "Sell";
@@ -73,7 +71,7 @@ export default function OrderForm({ base, quote, midPrice, marketId }: { base: s
               suffix={quote}
               value={price}
               onChange={setPrice}
-              placeholder={midPrice.toFixed(2)}
+              placeholder={ticker?.last_price.toFixed(2)}
             />
           )}
           <LabeledInput
@@ -87,7 +85,7 @@ export default function OrderForm({ base, quote, midPrice, marketId }: { base: s
           <div className="rounded-lg border border-white/10 bg-black/20 p-3">
             <div className="text-xs text-zinc-400">Order Value</div>
             <div className="mt-1 text-lg font-bold">
-              {qty && (parseFloat(qty) * parseFloat(kind === "Market" ? `${midPrice}` : price || "0")).toFixed(2)} {quote}
+              {qty && (parseFloat(qty) * parseFloat(kind === "Market" ? `${ticker?.last_price}` : price || "0")).toFixed(2)} {quote}
             </div>
           </div>
   
@@ -98,21 +96,6 @@ export default function OrderForm({ base, quote, midPrice, marketId }: { base: s
           >
             {loading ? "Placing..." : sideTitle}
           </button>
-  
-          <div className="mt-2 grid grid-cols-3 gap-2 text-xs text-zinc-300">
-            <label className="flex items-center gap-2">
-              <input type="checkbox" checked={postOnly} onChange={(e) => setPostOnly(e.target.checked)} className="accent-emerald-500" />
-              Post Only
-            </label>
-            <label className="flex items-center gap-2">
-              <input type="checkbox" checked={ioc} onChange={(e) => setIoc(e.target.checked)} className="accent-emerald-500" />
-              IOC
-            </label>
-            <label className="flex items-center gap-2">
-              <input type="checkbox" checked={margin} onChange={(e) => setMargin(e.target.checked)} className="accent-emerald-500" />
-              Margin
-            </label>
-          </div>
         </div>
       </div>
     );

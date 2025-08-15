@@ -10,6 +10,7 @@ import {
   } from "@/components/ui/select"
 import { Input } from "@/components/ui/input"
 import { useBalances } from "@/store/balances";
+import { ChevronDown, ChevronUp } from "lucide-react";
 
 type Props = { open: boolean; onOpenChange: (open: boolean) => void };
 type Token = {
@@ -95,7 +96,42 @@ export default function DepositDialog({ open, onOpenChange }: Props) {
         {/* Amount */}
         <div className="mb-4">
           <label className="mb-2 block text-sm text-zinc-400">Amount</label>
-          <Input type="number" value={amount} min={0} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setAmount(e.target.value)} className="w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 outline-none" />
+          <div className="relative">
+            <Input 
+              type="number" 
+              value={amount} 
+              min={0} 
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) => setAmount(e.target.value)} 
+              className="w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 outline-none" 
+            />
+            <div className="pointer-events-auto absolute inset-y-1 right-1 flex w-10 flex-col justify-between">
+              <button
+                type="button"
+                aria-label="Increase amount"
+                className="grid h-5 place-items-center text-zinc-600 cursor-pointer"
+                onClick={() => {
+                  const v = parseFloat(amount || "0");
+                  const next = Number.isFinite(v) ? v + 1 : 1; // step = 1; adjust as needed
+                  setAmount(String(next));
+                }}
+              >
+                <ChevronUp size={14} />
+              </button>
+              <button
+                type="button"
+                aria-label="Decrease amount"
+                className="grid h-5 place-items-center text-zinc-600 cursor-pointer"
+                onClick={() => {
+                  const v = parseFloat(amount || "0");
+                  const next = Math.max(0, Number.isFinite(v) ? v - 1 : 0);
+                  setAmount(String(next));
+                }}
+                disabled={parseFloat(amount || "0") <= 0}
+              >
+                <ChevronDown size={14} />
+              </button>
+            </div>
+          </div>
         </div>
         {/* Actions */}
         <div className="mt-5 flex justify-end gap-2">

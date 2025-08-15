@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { useAuth } from "@/store/auth";
+import { toast } from "sonner";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -19,9 +20,12 @@ export default function LoginPage() {
     
     try {
       await login(email, pw);
+      toast("Logged in successfully");
       router.push("/exchange");
     } catch (e: any) {
-      console.error(e);
+      toast("Failed to login", {
+        description: e.message,
+      });
     }
   }
 

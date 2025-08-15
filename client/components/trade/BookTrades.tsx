@@ -1,9 +1,11 @@
 // client/components/trade/BookTrades.tsx
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useMarketFeedStore } from '@/store/marketFeed';
-
+import { ScrollArea } from "@/components/ui/scroll-area"
+import { Button } from '../ui/button';
+import { fromAtomic } from '@/lib/units';
 type OBRow = { price: number; size: number };
 type RowView = OBRow & { total: number; pct: number; bg: string };
 
@@ -39,18 +41,18 @@ function buildDepth(
 
 export default function BookTrades() {
   const [tab, setTab] = useState<'book' | 'trades'>('book');
-
+  
   const marketId = useMarketFeedStore((s) => s.currentMarketId);
   
   const depth = useMarketFeedStore((s) => (marketId ? s.depthByMarket[marketId] : undefined));
   const tradesSel = useMarketFeedStore((s) => (marketId ? s.tradesByMarket[marketId] : undefined));
 
   const asksRows = useMemo(
-    () => (depth?.asks ?? EMPTY_LEVELS).map(([p, q]) => ({ price: p, size: q })),
+    () => (depth?.asks ?? EMPTY_LEVELS).map(([p, q]) => ({ price: Number(p), size: q })),
     [depth]
   );
   const bidsRows = useMemo(
-    () => (depth?.bids ?? EMPTY_LEVELS).map(([p, q]) => ({ price: p, size: q })),
+    () => (depth?.bids ?? EMPTY_LEVELS).map(([p, q]) => ({ price: Number(p), size: q })),
     [depth]
   );
 
@@ -60,7 +62,7 @@ export default function BookTrades() {
   const mid = bestAsk && bestBid ? (bestAsk + bestBid) / 2 : undefined;
 
   const asksDepth = useMemo(
-    () => buildDepth('asks', asksRows, { reverseCum: true, anchor: 'right' }),
+    () => buildDepth('asks', [...asksRows].reverse(), { reverseCum: true, anchor: 'right' }),
     [asksRows]
   );
   const bidsDepth = useMemo(
@@ -77,6 +79,40 @@ export default function BookTrades() {
       return { time, price: t.price, size: t.quantity, side };
     });
   }, [trades, mid]);
+
+  const bodyRef = useRef<HTMLTableSectionElement | null>(null);
+  const midRowRef = useRef<HTMLTableRowElement | null>(null);
+  const hasUserScrolledRef = useRef(false);
+
+  const scrollMidIntoCenter = (smooth = false) => {
+    const body = bodyRef.current;
+    const midEl = midRowRef.current;
+    if (!body || !midEl) return;
+    const bodyRect = body.getBoundingClientRect();
+    const midRect = midEl.getBoundingClientRect();
+    const delta = midRect.top - bodyRect.top;
+    const target = body.scrollTop + delta - (body.clientHeight / 2 - midRect.height / 2);
+    const max = body.scrollHeight - body.clientHeight;
+    const top = Math.max(0, Math.min(max, target));
+    if (smooth) {
+      body.scrollTo({ top, behavior: 'smooth' });
+    } else {
+      body.scrollTop = top;
+    }
+  }
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (!el) return;
+    const onScroll = () => { hasUserScrolledRef.current = true; };
+    el.addEventListener('scroll', onScroll, { passive: true });
+    return () => el.removeEventListener('scroll', onScroll);
+  }, []);
+
+  useEffect(() => {
+    if (tab !== 'book') return;
+    if (hasUserScrolledRef.current) return;
+    scrollMidIntoCenter(true);
+  }, [tab, mid, asksDepth.length, bidsDepth.length]);
 
   return (
     <div>
@@ -101,62 +137,82 @@ export default function BookTrades() {
 
       {tab === 'book' ? (
         <div className="grid grid-cols-1 gap-2">
-          <div className="overflow-hidden rounded-lg border border-white/10">
-            <table className="w-full border-collapse text-xs">
-              <thead className="bg-white/5 text-zinc-300">
-                <tr>
-                  <th className="px-2 py-1.5 text-left font-medium">Price</th>
-                  <th className="px-2 py-1.5 text-left font-medium">Size</th>
-                  <th className="px-2 py-1.5 text-left font-medium">Total</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(asksDepth.length ? asksDepth : []).map((r, i) => (
-                  <tr key={`a-${i}`} className="border-t border-white/10" style={{ backgroundImage: r.bg, backgroundRepeat: 'no-repeat' }}>
-                    <td className="px-2 py-1.5 text-rose-400">{r.price}</td>
-                    <td className="px-2 py-1.5">{r.size}</td>
-                    <td className="px-2 py-1.5">{r.total.toFixed(2)}</td>
-                  </tr>
-                ))}
-                <tr className="bg-white/5">
-                  <td className="px-2 py-1.5 font-bold text-emerald-300">{mid !== undefined ? mid.toFixed(2) : '—'}</td>
-                  <td className="px-2 py-1.5 text-zinc-400">—</td>
-                  <td className="px-2 py-1.5 text-zinc-400">—</td>
-                </tr>
-                {(bidsDepth.length ? bidsDepth : []).map((r, i) => (
-                  <tr key={`b-${i}`} className="border-t border-white/10" style={{ backgroundImage: r.bg, backgroundRepeat: 'no-repeat' }}>
-                    <td className="px-2 py-1.5 text-emerald-400">{r.price}</td>
-                    <td className="px-2 py-1.5">{r.size}</td>
-                    <td className="px-2 py-1.5">{r.total.toFixed(2)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div className="relative overflow-hidden rounded-lg border border-white/10">
+            <div className="absolute z-10 top-0 left-0 w-full bg-gray-900 text-zinc-300 text-xs">
+                <div className="flex items-center justify-between w-full ">
+                  <div className="px-2 py-1.5 text-left font-medium">Price</div>
+                  <div className="px-2 py-1.5 text-left font-medium">Size</div>
+                  <div className="px-2 py-1.5 text-left font-medium">Total</div>
+                </div>
+              </div>
+          <div
+          ref={bodyRef}
+                className="block h-120 overflow-y-auto [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+          > 
+          <div className="relative w-full  text-xs border-collapse">
+              <div className="pt-7">
+                  {(asksDepth.length ? asksDepth : []).map((r, i) => (
+                    <div key={`a-${i}`} className="flex justify-between border-t border-white/10" style={{ backgroundImage: r.bg, backgroundRepeat: 'no-repeat' }}>
+                      <div className="px-2 py-1.5 text-rose-400">{r.price.toFixed(2)}</div>
+                      <div className="px-2 py-1.5">{r.size}</div>
+                      <div className="px-2 py-1.5">{r.total}</div>
+                    </div>
+                  ))}
+                  <div ref={midRowRef} className="flex items-center justify-between bg-white/5">
+                    <div className="px-2 py-1.5 font-bold text-emerald-300">{mid !== undefined ? mid.toFixed(2) : '—'}</div>
+                    <div className="px-2 py-1.5 text-zinc-400"></div>
+                    <div className="px-2 py-1.5">
+                      {hasUserScrolledRef.current && (
+                        <Button 
+                        variant="ghost"
+                        size="sm"
+                        className="text-blue-500 hover:text-blue-600 cursor-pointer"
+                        onClick={() => {
+                          hasUserScrolledRef.current = false;
+                          scrollMidIntoCenter(true);
+                        }}>
+                          Recentre
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                  {(bidsDepth.length ? bidsDepth : []).map((r, i) => (
+                    <div key={`b-${i}`} className="flex justify-between border-t border-white/10" style={{ backgroundImage: r.bg, backgroundRepeat: 'no-repeat' }}>
+                      <div className="px-2 py-1.5 text-emerald-400">{r.price.toFixed(2)}</div>
+                      <div className="px-2 py-1.5">{r.size}</div>
+                      <div className="px-2 py-1.5">{r.total}</div>
+                    </div>
+                  ))}
+              </div>
+              </div>
+              </div>
           </div>
         </div>
       ) : (
         <div className="overflow-hidden rounded-lg border border-white/10">
-          <table className="w-full border-collapse text-xs">
-            <thead className="bg-white/5 text-zinc-300">
-              <tr>
-                <th className="px-2 py-1.5 text-left font-medium">Time</th>
-                <th className="px-2 py-1.5 text-left font-medium">Price</th>
-                <th className="px-2 py-1.5 text-left font-medium">Size</th>
-              </tr>
-            </thead>
-            <tbody>
-              {recentTrades.map((t, i) => (
-                <tr key={i} className="border-t border-white/10">
-                  <td className="px-2 py-1.5">{t.time}</td>
-                  <td className={`px-2 py-1.5 ${t.side === 'buy' ? 'text-emerald-400' : 'text-rose-400'}`}>{t.price}</td>
-                  <td className="px-2 py-1.5">{t.size}</td>
+          <ScrollArea className='h-120'>
+            <table className="w-full border-collapse text-xs">
+              <thead className="bg-white/5 text-zinc-300">
+                <tr>
+                  <th className="px-2 py-1.5 text-left font-medium">Time</th>
+                  <th className="px-2 py-1.5 text-left font-medium">Price</th>
+                  <th className="px-2 py-1.5 text-left font-medium">Size</th>
                 </tr>
-              ))}
-              {!recentTrades.length && (
-                <tr><td className="px-2 py-2 text-zinc-400" colSpan={3}>No trades yet</td></tr>
-              )}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {recentTrades.map((t, i) => (
+                  <tr key={i} className="border-t border-white/10">
+                    <td className="px-2 py-1.5">{t.time}</td>
+                    <td className={`px-2 py-1.5 ${t.side === 'buy' ? 'text-emerald-400' : 'text-rose-400'}`}>{t.price}</td>
+                    <td className="px-2 py-1.5">{t.size}</td>
+                  </tr>
+                ))}
+                {!recentTrades.length && (
+                  <tr><td className="px-2 py-2 text-zinc-400" colSpan={3}>No trades yet</td></tr>
+                )}
+              </tbody>
+            </table>
+          </ScrollArea>
         </div>
       )}
     </div>

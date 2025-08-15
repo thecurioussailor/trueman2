@@ -1,19 +1,7 @@
 import Link from "next/link";
 import { useEffect } from "react";
 import { useMarkets } from "@/store/markets";
-
-type Market = {
-    symbol: string;    // e.g. "SOL/USDC"
-    price: string;     // e.g. "168.24"
-    change24h: string; // "+2.1%" or "-0.9%"
-    volume24h: string; // e.g. "2.3M SOL"
-  };
   
-  const MOCK_MARKETS: Market[] = [
-    { symbol: "BTC/USDC", price: "68420.12", change24h: "+2.4%", volume24h: "12,345 BTC" },
-    { symbol: "ETH/USDC", price: "3420.08", change24h: "-1.2%", volume24h: "98,210 ETH" },
-    { symbol: "SOL/USDC", price: "168.02", change24h: "+5.1%", volume24h: "2,340,100 SOL" },
-  ];
 const Markets = () => {
   const { markets, loading, error, fetchPublic } = useMarkets();
 
@@ -25,15 +13,15 @@ const Markets = () => {
     <div className="mx-auto max-w-7xl px-4 py-6">
 
         {/* Markets table */}
-        <div className="overflow-hidden rounded-xl border border-white/10 bg-white/5">
+        <div className="overflow-hidden rounded-xl border border-white/10 bg-black/5">
           <table className="w-full border-collapse text-sm">
-            <thead className="bg-white/5 text-zinc-300">
+            <thead className="bg-black/30 text-zinc-300">
               <tr>
-                <th className="px-4 py-3 text-left font-medium">Market</th>
-                <th className="px-4 py-3 text-left font-medium">Price</th>
-                <th className="px-4 py-3 text-left font-medium">24h Change</th>
-                <th className="px-4 py-3 text-left font-medium">24h Volume</th>
-                <th className="px-4 py-3 text-right font-medium">Trade</th>
+                <th className="px-6 py-6 text-left font-bold text-zinc-300">Market</th>
+                <th className="px-6 py-6 text-left font-bold text-zinc-300">Price</th>
+                <th className="px-6 py-6 text-left font-bold text-zinc-300">24h Change</th>
+                <th className="px-6 py-6 text-left font-bold text-zinc-300">24h Volume</th>
+                <th className="px-6 py-6 text-right font-bold">Trade</th>
               </tr>
             </thead>
             <tbody>
