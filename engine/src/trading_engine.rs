@@ -199,6 +199,7 @@ impl TradingEngine {
         };
 
         // 2. Validate balances (now we have balance data!)
+        println!("Validating and locking order balance order: {:?}", order);
         let reservation = match self.validate_and_lock_order_balance(&order).await {
             Ok(reservation) => reservation,
             Err(msg) => {
@@ -671,8 +672,10 @@ impl TradingEngine {
             let seller_id = trade.seller_user_id; 
             let quote_id = market_info.quote_currency.id;
             let base_id  = market_info.base_currency.id;
-            let cost = trade.price * trade.quantity;
 
+             // FIXED: Correct calculation for trade cost
+            let base_multiplier = 10_i64.pow(market_info.base_currency.decimals as u32);
+            let cost = (trade.price * trade.quantity) / base_multiplier;
             // Buyer: spend quote (locked if resting limit or immediate if market), credit base
             let buyer_qoute_locked_now = self.balances.get(&buyer_id)
                 .and_then(|ub| ub.token_balances.get(&quote_id))
@@ -1485,13 +1488,15 @@ impl TradingEngine {
                 let required_quote = match order.order_kind {
                     OrderKind::Limit => {
                         let price = order.price.ok_or_else(|| "Limit buy requires price".to_string())?;
-                        price * order.quantity
+                        let base_multiplier = 10_i64.pow(market.base_currency.decimals as u32);
+                        (price * order.quantity) / base_multiplier
                     }
                     OrderKind::Market => {
                         // Estimate cost for market buy; if no liquidity, reject
                         let est = self.estimate_market_buy_price(order.market_id, order.quantity)
                             .ok_or_else(|| format!("No liquidity available for market buy in {}", market.symbol))?;
-                        est * order.quantity
+                        let base_multiplier = 10_i64.pow(market.base_currency.decimals as u32);
+                        (est * order.quantity) / base_multiplier
                     }
                 };
 
@@ -1538,6 +1543,7 @@ impl TradingEngine {
     //KEEP THIS FUNCTION
     fn estimate_market_buy_price(&self, market_id: Uuid, quantity: i64) -> Option<i64> {
         let orderbook = self.orderbooks.get(&market_id)?;
+        let market = self.markets.get(&market_id)?;
         let mut remaining_quantity = quantity;
         let mut total_cost = 0i64;
         
@@ -1550,7 +1556,10 @@ impl TradingEngine {
                 .sum();
             
             let quantity_to_buy = remaining_quantity.min(available_at_price);
-            total_cost += price * quantity_to_buy;
+            
+            // CORRECT calculation: (price * quantity) / base_multiplier
+            let base_multiplier = 10_i64.pow(market.base_currency.decimals as u32);
+            total_cost += (price * quantity_to_buy) / base_multiplier;
             remaining_quantity -= quantity_to_buy;
         }
         
@@ -1563,7 +1572,8 @@ impl TradingEngine {
             }
         } else {
             // We can fulfill the order - return average price
-            Some(total_cost / quantity)
+            let base_multiplier = 10_i64.pow(market.base_currency.decimals as u32);
+            Some((total_cost * base_multiplier) / quantity)
         }
     }
 

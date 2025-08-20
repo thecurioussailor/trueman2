@@ -18,8 +18,8 @@ pub use model::{
     NewBalance, Balance,
     BalanceResponse,
     UserBalancesResponse,
-    DepositRequest,
-    WithdrawRequest,
+    DecimalDepositRequest,
+    DecimalWithdrawRequest,
     TransactionResponse,
 };
 

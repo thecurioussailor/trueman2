@@ -5,12 +5,13 @@ use diesel::prelude::*;
 use crate::jwt::Claims;
 use chrono::Utc;
 use uuid::Uuid;
+use crate::decimal_utils::{ to_atomic_units, ConversionError, convert_balances_to_decimal};
 use crate::redis_manager::{
     get_redis_manager, EngineMessage, EngineProcessingResult, EngineResponse,
     BalanceRequest, BalanceOperation
 };
 use database::{
-    DepositRequest, WithdrawRequest,
+    DecimalDepositRequest, DecimalWithdrawRequest,
     TransactionResponse,
     UserBalancesResponse
 };
@@ -98,7 +99,21 @@ pub async fn get_user_balance(req: HttpRequest) -> impl Responder {
     match redis_manager.send_and_wait(EngineMessage::Balance(balance_request), 3).await {
         EngineProcessingResult::Success(EngineResponse::Balance(response)) => {
             if response.success {
-                HttpResponse::Ok().json(response.balances)
+                if let Some(atomic_balances) = response.balances {
+                    match convert_balances_to_decimal(atomic_balances) {
+                        Ok(decimal_response) => {
+                            HttpResponse::Ok().json(decimal_response)
+                        }
+                        Err(e) => {
+                            HttpResponse::InternalServerError().json(ErrorResponse::new(&format!("Conversion error: {}", e)))
+                        }
+                    }
+                } else {
+                    // No balances found
+                    HttpResponse::Ok().json(crate::decimal_utils::DecimalBalanceResponse {
+                        balances: vec![],
+                    })
+                }
             } else {
                 HttpResponse::InternalServerError().json(response.message)
             }
@@ -116,7 +131,7 @@ pub async fn get_user_balance(req: HttpRequest) -> impl Responder {
 }
 
 #[post("/deposit")]
-pub async fn deposit_funds(req: HttpRequest, body: Json<DepositRequest>) -> impl Responder {
+pub async fn deposit_funds(req: HttpRequest, body: Json<DecimalDepositRequest>) -> impl Responder {
     let user_id = match req.extensions().get::<Claims>() {
         Some(claims) => {
             match Uuid::parse_str(&claims.user_id) {
@@ -135,9 +150,25 @@ pub async fn deposit_funds(req: HttpRequest, body: Json<DepositRequest>) -> impl
     let body = body.into_inner();
     
     // Validate request
-    if body.amount <= 0 {
+    if body.amount <= 0.0 {
         return HttpResponse::BadRequest().json("Invalid amount");
     }
+
+    let atomic_amount = match to_atomic_units(body.amount, body.token_id) {
+        Ok(amount) => amount,
+        Err(ConversionError::TokenNotFound) => {
+            return HttpResponse::BadRequest().json(ErrorResponse::new("Token not found"));
+        },
+        Err(ConversionError::InvalidAmount) => {
+            return HttpResponse::BadRequest().json(ErrorResponse::new("Invalid amount"));
+        },
+        Err(ConversionError::Overflow) => {
+            return HttpResponse::BadRequest().json(ErrorResponse::new("Amount too large"));
+        },
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(ErrorResponse::new(&format!("Conversion error: {}", e)));
+        }
+    };
     
     // Create deposit request for engine
     let deposit_request = BalanceRequest {
@@ -145,7 +176,7 @@ pub async fn deposit_funds(req: HttpRequest, body: Json<DepositRequest>) -> impl
         user_id,
         token_id: body.token_id,
         operation: BalanceOperation::Deposit,
-        amount: body.amount,
+        amount: atomic_amount,
         timestamp: Utc::now().timestamp_millis(),
     };
     
@@ -180,7 +211,7 @@ pub async fn deposit_funds(req: HttpRequest, body: Json<DepositRequest>) -> impl
 }
 
 #[post("/withdraw")]
-pub async fn withdraw_funds(req: HttpRequest, body: Json<WithdrawRequest>) -> impl Responder {
+pub async fn withdraw_funds(req: HttpRequest, body: Json<DecimalWithdrawRequest>) -> impl Responder {
     let user_id = match req.extensions().get::<Claims>() {
         Some(claims) => {
             match Uuid::parse_str(&claims.user_id) {
@@ -199,9 +230,25 @@ pub async fn withdraw_funds(req: HttpRequest, body: Json<WithdrawRequest>) -> im
 
     let body = body.into_inner();
 
-    if body.amount <= 0 {
+    if body.amount <= 0.0 {
         return HttpResponse::BadRequest().json("Withdrawal amount must be positive");
     }
+
+     let atomic_amount = match to_atomic_units(body.amount, body.token_id) {
+        Ok(amount) => amount,
+        Err(ConversionError::TokenNotFound) => {
+            return HttpResponse::BadRequest().json(ErrorResponse::new("Token not found"));
+        },
+        Err(ConversionError::InvalidAmount) => {
+            return HttpResponse::BadRequest().json(ErrorResponse::new("Invalid amount"));
+        },
+        Err(ConversionError::Overflow) => {
+            return HttpResponse::BadRequest().json(ErrorResponse::new("Amount too large"));
+        },
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(ErrorResponse::new(&format!("Conversion error: {}", e)));
+        }
+    };
 
     // Create withdrawal request for engine
     let withdraw_request = BalanceRequest {
@@ -209,7 +256,7 @@ pub async fn withdraw_funds(req: HttpRequest, body: Json<WithdrawRequest>) -> im
         user_id,
         token_id: body.token_id,
         operation: BalanceOperation::Withdraw,
-        amount: body.amount,
+        amount: atomic_amount,
         timestamp: Utc::now().timestamp_millis(),
     };
 

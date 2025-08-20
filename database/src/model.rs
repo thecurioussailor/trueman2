@@ -315,17 +315,16 @@ pub struct UserBalancesResponse {
     pub balances: Vec<BalanceResponse>,
 }
 
-// Request models for deposits/withdrawals
-#[derive(Deserialize)]
-pub struct DepositRequest {
+#[derive(Deserialize, Debug)]
+pub struct DecimalDepositRequest {
     pub token_id: Uuid,
-    pub amount: i64,
+    pub amount: f64,
 }
 
-#[derive(Deserialize)]
-pub struct WithdrawRequest {
+#[derive(Deserialize, Debug)]
+pub struct DecimalWithdrawRequest {
     pub token_id: Uuid,
-    pub amount: i64,
+    pub amount: f64, 
 }
 
 #[derive(Serialize)]

@@ -2,11 +2,13 @@ use actix_cors::Cors;
 use actix_web::{App, HttpServer, web};
 use actix_web_httpauth::middleware::HttpAuthentication;
 use actix_web::middleware::Logger;
+use tracing_subscriber::EnvFilter;
 
 pub mod routes;
 pub mod jwt;
 pub mod redis_manager;
-
+pub mod registry;
+pub mod decimal_utils;
 use routes::{
     auth::{login, signup, admin_login},
     token::{create_token, get_tokens, update_token, delete_token, get_public_tokens},
@@ -18,9 +20,37 @@ use routes::{
 };
 use routes::test::{get_user_profile, admin_dashboard};
 use jwt::{admin_auth, user_auth};
+use registry::load_registry;
+use std::time::Duration;
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
+        .init();    
+    // Initial registry load (tokens + markets)
+    {
+        let mut conn = database::establish_connection();
+        load_registry(&mut conn).expect("failed to load registry");
+        let (tok_cnt, mkt_cnt) = registry::counts();
+        tracing::info!("Registry loaded: {} tokens, {} markets", tok_cnt, mkt_cnt);
+    }
+
+    // Periodic refresh (simple loop; swap to LISTEN/NOTIFY or pubsub later)
+    actix_web::rt::spawn(async move {
+        loop {
+            actix_web::rt::time::sleep(Duration::from_secs(60)).await;
+            let mut conn = database::establish_connection();
+            if let Err(e) = load_registry(&mut conn) {
+                tracing::warn!("Registry refresh failed: {}", e);
+            } else {
+                let (tok_cnt, mkt_cnt) = registry::counts();
+                tracing::info!("Registry refreshed: {} tokens, {} markets", tok_cnt, mkt_cnt);
+            }
+        }
+    });
+
     HttpServer::new(move || {
         App::new()
             .wrap(Logger::default())
