@@ -1,5 +1,6 @@
 mod redis_manager;
 mod trading_engine;
+mod decimal_utils;
 
 use redis_manager::{EngineRedisManager, EngineMessage, EngineResponse};
 use trading_engine::TradingEngine;

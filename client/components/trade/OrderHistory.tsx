@@ -69,7 +69,7 @@ const OrderHistory = () => {
                       {new Date(o.created_at).toLocaleString()}
                     </td>
                     <td className="px-3 py-2">{o.market?.symbol?.replace("-", "/")}</td>
-                    <td className={`px-3 py-2 ${o.order_type === "Buy" ? "text-emerald-400" : "text-rose-400"}`}>
+                    <td className={`px-3 py-2 ${o.order_type === "BUY" ? "text-emerald-400" : "text-rose-400"}`}>
                       {o.order_type}
                     </td>
                     <td className="px-3 py-2">{o.order_kind}</td>

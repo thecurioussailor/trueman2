@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { FaDiscord, FaGithub, FaLinkedin, FaXTwitter } from "react-icons/fa6";
 
 export default function Home() {
   return (
@@ -150,10 +151,12 @@ export default function Home() {
         <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-6 text-sm text-zinc-300">
           <div>© {new Date().getFullYear()} Trueman Exchange</div>
           <div className="flex gap-4">
-            <Link href="/terms" className="hover:text-white">Terms</Link>
-            <Link href="/privacy" className="hover:text-white">Privacy</Link>
-            <Link href="/fees" className="hover:text-white">Fees</Link>
-            <Link href="/support" className="hover:text-white">Support</Link>
+            <Link href="https://x.com/sagar11ashutosh" target="_blank" className="hover:text-white">
+              <FaXTwitter />  
+            </Link>
+            <Link href="https://github.com/thecurioussailor" target="_blank" className="hover:text-white"><FaGithub /></Link>
+            <Link href="https://discord.gg/Xuj3hdYS" target="_blank" className="hover:text-white"><FaDiscord /></Link>
+            <Link href="https://www.linkedin.com/in/ashutosh-sagar-4b2612185/" target="_blank" className="hover:text-white"><FaLinkedin /></Link>
           </div>
         </div>
       </footer>

@@ -11,13 +11,13 @@ pub struct StartSimulatorRequest {
     pub base_token_id: Uuid,
     pub quote_token_id: Uuid,
     pub users: usize,
-    pub base_deposit: i64,
-    pub quote_deposit: i64,
+    pub base_deposit: f64,
+    pub quote_deposit: f64,
     pub order_rate_ms: u64,
-    pub min_qty: i64,
-    pub max_qty: i64,
-    pub start_mid: i64,
-    pub tick: i64,
+    pub min_qty: f64,
+    pub max_qty: f64,
+    pub start_mid: f64,
+    pub tick: f64,
 }
 
 #[post("/simulator/start")]

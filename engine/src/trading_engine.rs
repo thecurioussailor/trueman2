@@ -2,11 +2,15 @@ use std::collections::{HashMap, BTreeMap, VecDeque};
 use uuid::Uuid;
 use serde::{Serialize, Deserialize};
 use tokio::time::{interval, Duration};
-use redis::{aio::ConnectionManager, AsyncCommands, Commands}; 
+use redis::{aio::ConnectionManager, AsyncCommands, Commands};
+use primitive_types::U256;
 use chrono::Utc;
 use diesel::prelude::*;
 use database::{establish_connection, Market, Token, schema::{markets, tokens}};
-
+use crate::decimal_utils::{
+    price_from_atomic_units, quantity_from_atomic_units,
+    EnhancedDepthUpdate, EnhancedMarketTicker, convert_ticker_to_decimal
+};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Order {
     pub id: Uuid,
@@ -126,13 +130,16 @@ pub struct TokenInfo {
     pub is_active: bool,
 }
 
+// Update the DepthUpdate struct to include both decimal and atomic values
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DepthUpdate {
     pub market_id: Uuid,
     pub seq: u64,
     pub ts: i64,
-    pub bids: Vec<(i64, i64)>, // price, total_qty
-    pub asks: Vec<(i64, i64)>, // price, total_qty
+    pub bids: Vec<(f64, f64)>,        // Decimal values (price, quantity)
+    pub asks: Vec<(f64, f64)>,        // Decimal values (price, quantity)
+    pub bids_atomic: Vec<(i64, i64)>, // Atomic values for debugging
+    pub asks_atomic: Vec<(i64, i64)>, // Atomic values for debugging
 }
 
 pub struct TradingEngine {
@@ -341,46 +348,94 @@ impl TradingEngine {
     // KEEP THIS FUNCTION
     fn build_depth(&self, market_id: Uuid, top_n: usize) -> Option<(Vec<(i64,i64)>, Vec<(i64,i64)>)> {
         let ob = self.orderbooks.get(&market_id)?;
-        let bids = ob.bids.iter().rev().take(top_n).map(|(&price, orders)| {
-            let q: i64 = orders.iter().map(|o| o.quantity - o.filled_quantity).sum();
-            (price, q)
-        }).collect::<Vec<_>>();
-        let asks = ob.asks.iter().take(top_n).map(|(&price, orders)| {
-            let q: i64 = orders.iter().map(|o| o.quantity - o.filled_quantity).sum();
-            (price, q)
-        }).collect::<Vec<_>>();
+        
+        let bids = ob.bids.iter().rev().take(top_n).filter_map(|(&price, orders)| {
+            let mut total_quantity = 0i64;
+            for order in orders {
+                let remaining = order.quantity - order.filled_quantity;
+                match total_quantity.checked_add(remaining) {
+                    Some(new_total) => total_quantity = new_total,
+                    None => {
+                        tracing::warn!("Quantity overflow in depth for market {} at price {}", market_id, price);
+                        return None;
+                    }
+                }
+            }
+            Some((price, total_quantity))
+        }).collect();
+        
+        let asks = ob.asks.iter().take(top_n).filter_map(|(&price, orders)| {
+            let mut total_quantity = 0i64;
+            for order in orders {
+                let remaining = order.quantity - order.filled_quantity;
+                match total_quantity.checked_add(remaining) {
+                    Some(new_total) => total_quantity = new_total,
+                    None => {
+                        tracing::warn!("Quantity overflow in depth for market {} at price {}", market_id, price);
+                        return None;
+                    }
+                }
+            }
+            Some((price, total_quantity))
+        }).collect();
+        
         Some((bids, asks))
     }
 
-    async fn publish_depth(&mut self, market_id: Uuid) {
-        println!("Publishing depth for market {}", market_id);
-        if let Some((bids, asks)) = self.build_depth(market_id, 50) { // top 50
+    // Update the publish_depth function
+async fn publish_depth(&mut self, market_id: Uuid) {
+    println!("Publishing depth for market {}", market_id);
+    if let Some((bids_atomic, asks_atomic)) = self.build_depth(market_id, 50) { // top 50
+        if let Some(market_info) = self.markets.get(&market_id) {
+            // Convert to decimal format
+            let bids_decimal: Vec<(f64, f64)> = bids_atomic.iter().map(|&(price, quantity)| {
+                let price_decimal = price_from_atomic_units(price, market_info);
+                let quantity_decimal = quantity_from_atomic_units(quantity, market_info);
+                (price_decimal, quantity_decimal)
+            }).collect();
+
+            let asks_decimal: Vec<(f64, f64)> = asks_atomic.iter().map(|&(price, quantity)| {
+                let price_decimal = price_from_atomic_units(price, market_info);
+                let quantity_decimal = quantity_from_atomic_units(quantity, market_info);
+                (price_decimal, quantity_decimal)
+            }).collect();
+
             let seq = self.depth_seq.entry(market_id).and_modify(|s| *s += 1).or_insert(1);
-            let update = DepthUpdate {
+            let enhanced_update = EnhancedDepthUpdate {
                 market_id,
                 seq: *seq,
                 ts: chrono::Utc::now().timestamp_millis(),
-                bids,
-                asks,
+                bids: bids_decimal,
+                asks: asks_decimal,
+                bids_atomic,
+                asks_atomic,
             };
+            
             let mut conn = self.redis_manager.clone();
             let _: Result<(), _> = conn.publish(
                 format!("depth:{}", market_id),
-                serde_json::to_string(&update).unwrap()
+                serde_json::to_string(&enhanced_update).unwrap()
             ).await;
         }
     }
+}
 
-    async fn publish_ticker(&mut self, market_id: Uuid) {
-        if let Some(ticker) = self.tickers.get(&market_id) {
+    // Update the publish_ticker function
+async fn publish_ticker(&mut self, market_id: Uuid) {
+    if let Some(atomic_ticker) = self.tickers.get(&market_id) {
+        if let Some(market_info) = self.markets.get(&market_id) {
+            let enhanced_ticker = convert_ticker_to_decimal(atomic_ticker, market_info);
+            
             let _seq = self.ticker_seq.entry(market_id).and_modify(|s| *s += 1).or_insert(1);
             let mut conn = self.redis_manager.clone();
             let _: Result<(), _> = conn.publish(
                 format!("ticker:{}", market_id),
-                serde_json::to_string(&ticker).unwrap()
+                serde_json::to_string(&enhanced_ticker).unwrap()
             ).await;
         }
     }
+}
+
     
     async fn publish_trades(&mut self, market_id: Uuid, trades: &[Trade]) {
         if trades.is_empty() { return; }
@@ -675,7 +730,7 @@ impl TradingEngine {
 
              // FIXED: Correct calculation for trade cost
             let base_multiplier = 10_i64.pow(market_info.base_currency.decimals as u32);
-            let cost = (trade.price * trade.quantity) / base_multiplier;
+            let cost = self.safe_multiply_divide(trade.price, trade.quantity, base_multiplier).unwrap();
             // Buyer: spend quote (locked if resting limit or immediate if market), credit base
             let buyer_qoute_locked_now = self.balances.get(&buyer_id)
                 .and_then(|ub| ub.token_balances.get(&quote_id))
@@ -1470,7 +1525,20 @@ impl TradingEngine {
     //     }
     // }
     
-    
+    // Add this helper function
+    fn safe_multiply_divide(&self, price: i64, quantity: i64, divisor: i64) -> Result<i64, String> {
+        let price_u256 = U256::from(price as u64);
+        let quantity_u256 = U256::from(quantity as u64);
+        let divisor_u256 = U256::from(divisor as u64);
+        
+        let result = (price_u256 * quantity_u256) / divisor_u256;
+        
+        if result > U256::from(i64::MAX as u64) {
+            return Err(format!("Result {} exceeds i64::MAX", result));
+        }
+        
+        Ok(result.as_u64() as i64)
+    }
 
     async fn validate_and_lock_order_balance(&mut self, order: &Order) -> Result<Reservation, String> {
         // Market
@@ -1489,14 +1557,14 @@ impl TradingEngine {
                     OrderKind::Limit => {
                         let price = order.price.ok_or_else(|| "Limit buy requires price".to_string())?;
                         let base_multiplier = 10_i64.pow(market.base_currency.decimals as u32);
-                        (price * order.quantity) / base_multiplier
+                        self.safe_multiply_divide(price, order.quantity, base_multiplier)?
                     }
                     OrderKind::Market => {
                         // Estimate cost for market buy; if no liquidity, reject
                         let est = self.estimate_market_buy_price(order.market_id, order.quantity)
                             .ok_or_else(|| format!("No liquidity available for market buy in {}", market.symbol))?;
                         let base_multiplier = 10_i64.pow(market.base_currency.decimals as u32);
-                        (est * order.quantity) / base_multiplier
+                        self.safe_multiply_divide(est, order.quantity, base_multiplier)?
                     }
                 };
 

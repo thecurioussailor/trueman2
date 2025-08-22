@@ -31,9 +31,10 @@ export const useBalances = create<State>((set, get) => ({
   fetch: async () => {
     set({ loading: true, error: null });
     try {
-      const { data } = await api.get<EngineBalance[]>("/user/balances");
+      const { data } = await api.get<{ balances: EngineBalance[] }>("/user/balances");
+      console.log("balances", data.balances);
       set({ 
-        items: (data  ?? []).map(b => ({
+        items: (data.balances  ?? []).map(b => ({
           token_id: b.token_id,
           available: b.available,
           locked: b.locked,

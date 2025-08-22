@@ -15,6 +15,7 @@ import { IoInformation } from "react-icons/io5";
 import { Play } from "lucide-react";
 import { FaXTwitter } from "react-icons/fa6";
 import Link from "next/link";
+import { useMarkets } from "@/store/markets";
 
 
 // helpers (top of file)
@@ -55,6 +56,7 @@ export default function TradePairPage() {
     const { pair } = useParams();
     const search = useSearchParams();
     const marketId = useMemo(() => search.get("id"), [search]); 
+    const { markets, fetchPublic } = useMarkets(); 
 
     const slug = pair?.toString().toLowerCase() || "";
     const parts = slug.split("-");
@@ -65,54 +67,79 @@ export default function TradePairPage() {
     const symbol = `${base}/${quote}`;
     const symbolTradingView = `${base.toUpperCase()}${quote.toUpperCase()}`;
 
+    // Find the current market data
+    const currentMarket = useMemo(() => {
+      return markets.find(market => market.id === marketId);
+  }, [markets, marketId]);
+
     const [bottomTab, setBottomTab] = useState<"recent" | "history">("recent");
 
     const { start, loading } = useSimulator();
     const [fabOpen, setFabOpen] = useState(false);
-
+    const [showTooltip, setShowTooltip] = useState(false);
     async function handleStartSimulator() {
+      if (!currentMarket) {
+        console.log("Market data not available");
+        return;
+      } 
       const start_mid = await fetchStartMidTruncated(pair as string);
       await start({
         market_id: marketId || "",
-        base_token_id: "17d52355-12a8-4e4f-8876-85ca2d772a8a",
-        quote_token_id: "90207bf6-fcb9-48d2-8715-def20994b25f",
+        base_token_id: currentMarket.base_currency.id,
+        quote_token_id: currentMarket.quote_currency.id,
         users: 8,
-        base_deposit: 1000000,
-        quote_deposit: 1000000,
+        base_deposit: 0.1,
+        quote_deposit: 100,
         order_rate_ms: 100,
-        min_qty: 1,
-        max_qty: 10,
+        min_qty: 0.001,
+        max_qty: 0.01,
         start_mid,
-        tick: 1,
+        tick: 0.01,
       });
       setFabOpen(false);
     }
+
+    // Load markets when component mounts
+    useEffect(() => {
+      fetchPublic();
+  }, [fetchPublic]);
+
     useEffect(() => {
       if (!marketId) return;
       useMarketFeedStore.getState().subscribeMarket(marketId);
     }, [marketId]);
 
     useEffect(() => {
-      if (!marketId) return;
+      if (!marketId || !currentMarket) return;
       (async () => {
         const start_mid = await fetchStartMidTruncated(pair as string);
         useSimulator.getState().start({
         market_id: marketId,
-        base_token_id: "17d52355-12a8-4e4f-8876-85ca2d772a8a",
-        quote_token_id: "90207bf6-fcb9-48d2-8715-def20994b25f",
+        base_token_id: currentMarket.base_currency.id,
+        quote_token_id: currentMarket.quote_currency.id,
         users: 8,
-        base_deposit: 1000000,
-        quote_deposit: 1000000,
+        base_deposit: 0.1,
+        quote_deposit: 100,
         order_rate_ms: 100,
-        min_qty: 1,
-        max_qty: 10,
+        min_qty: 0.001,
+        max_qty: 0.01,
         start_mid: start_mid,
-        tick: 1,
+        tick: 0.01,
       });
     })();
-    }, [marketId]);
+    }, [marketId, currentMarket, pair]);
 
-
+// Add loading state while market data is being fetched
+if (marketId && !currentMarket) {
+  return (
+      <main className="min-h-screen bg-[#0b0f14] text-zinc-100 flex items-center justify-center">
+          <div className="text-center">
+              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-zinc-100 mx-auto mb-4"></div>
+              <p>Loading market data...</p>
+          </div>
+      </main>
+  );
+}
 
   return (
     <main className="min-h-screen bg-[#0b0f14] text-zinc-100">
@@ -165,7 +192,17 @@ export default function TradePairPage() {
           <div className="flex flex-col gap-2">
             <div className="text-sm justify-between text-zinc-400 flex items-center gap-2">
               <span className="text-zinc-400">You can start simulator from bottom right corner.</span>
-              <IoInformation size={16} />
+              <div 
+                onMouseEnter={() => setShowTooltip(true)}
+                onMouseLeave={() => setShowTooltip(false)}
+                className="relative bg-white/10 rounded-full p-1 cursor-pointer">
+                {showTooltip && (
+                  <div className="absolute -top-16 left-0 w-48 bg-zinc-900 rounded-lg p-2 z-50">
+                    <span className="text-zinc-400">Orderbook data may differ from tradingview chart data.</span>
+                  </div>
+                )}
+                <IoInformation size={16} />
+              </div>
             </div>
             <div className="overflow-hidden rounded-lg border border-white/10 bg-black/20">
               <TradingViewChart symbol={`BINANCE:${symbolTradingView}`} height={420} />

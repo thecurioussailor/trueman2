@@ -12,13 +12,13 @@ struct StartMsg {
     base_token_id: Uuid,
     quote_token_id: Uuid,
     users: usize,
-    base_deposit: i64,
-    quote_deposit: i64,
+    base_deposit: f64,
+    quote_deposit: f64,
     order_rate_ms: u64,
-    min_qty: i64,
-    max_qty: i64,
-    start_mid: i64,
-    tick: i64,
+    min_qty: f64,
+    max_qty: f64,
+    start_mid: f64,
+    tick: f64,
 }
 
 #[derive(Clone)]
@@ -31,15 +31,18 @@ struct Signup { email: String, password: String }
 struct LoginResp { token: String }
 
 #[derive(Serialize)]
-struct DepositReq { token_id: Uuid, amount: i64 }
+struct DepositReq { 
+    token_id: Uuid, 
+    amount: f64  // Change to f64 if your API expects decimal deposits
+}
 
 #[derive(Serialize)]
 struct CreateOrderReq {
     market_id: Uuid,
     order_type: String, // "Buy" | "Sell"
     order_kind: String, // "Limit"
-    price: Option<i64>,
-    quantity: i64,
+    price: Option<f64>,
+    quantity: f64,
 }
 
 #[tokio::main]
@@ -126,24 +129,42 @@ async fn run_sim_for_10s(api: String, cfg: StartMsg) -> anyhow::Result<()> {
     }
 
     // Run for 10 seconds
-    let end = Instant::now() + Duration::from_secs(60);
+    let end = Instant::now() + Duration::from_secs(5);
     let mut rng = StdRng::from_seed([0x42; 32]);
     let mut mid = cfg.start_mid;
 
+    let min_price = mid - cfg.tick * 5.0;
+    let max_price = mid + cfg.tick * 5.0;
+
     while Instant::now() < end {
         // drift mid
-        let drift = rng.random_range(-2..=2);
+        let drift = rng.random_range(-5.0..=5.0);
         mid = (mid + drift).max(cfg.tick);
+
+        // Round mid to 2 decimal places
+        mid = (mid * 100.0).round() / 100.0;
 
         // pick user and params
         let u = &users[rng.random_range(0..users.len())];
         let is_buy = rng.random_bool(0.5);
         let is_limit = true;
         let qty = rng.random_range(cfg.min_qty..=cfg.max_qty);
+        
         let price = if is_limit {
-            let offs = rng.random_range(0i64..=5) * cfg.tick;
-            Some(if is_buy { (mid - offs).max(cfg.tick) } else { mid + offs })
-        } else { None };
+            // Generate spread around current mid price
+            let spread_range = rng.random_range(0.01..=2.0); // 1 cent to $2 spread
+            let raw_price = if is_buy { 
+                mid - spread_range  // Buy below mid
+            } else { 
+                mid + spread_range  // Sell above mid
+            };
+            
+            // Round to 2 decimal places and ensure minimum price
+            let rounded_price = ((raw_price * 100.0).round() / 100.0).max(0.01);
+            Some(rounded_price)
+        } else { 
+            None 
+        };
 
         let req = CreateOrderReq {
             market_id: cfg.market_id,
@@ -164,7 +185,7 @@ async fn ensure_user(client: &Client, api: &str, email: &str, pass: &str) -> any
     if r.status() != StatusCode::OK { anyhow::bail!("login failed {}", r.status()) }
     Ok(r.json::<LoginResp>().await?.token)
 }
-async fn deposit(client: &Client, api: &str, jwt: &str, token_id: Uuid, amount: i64) -> anyhow::Result<()> {
+async fn deposit(client: &Client, api: &str, jwt: &str, token_id: Uuid, amount: f64) -> anyhow::Result<()> {
     let r = client.post(format!("{api}/user/deposit")).bearer_auth(jwt).json(&DepositReq { token_id, amount }).send().await?;
     if !r.status().is_success() { anyhow::bail!("deposit failed: {}", r.text().await?) }
     Ok(())

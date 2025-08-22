@@ -18,6 +18,7 @@ import { useAuth } from "@/store/auth";
 import { useRouter } from "next/navigation";
 import jim from "@/public/jim-carrey.svg";
 import { IoSearch } from "react-icons/io5";
+import Wallet from "./Wallet";
 type Market = {
     symbol: string;    // e.g. "SOL/USDC"
     price: string;     // e.g. "168.24"
@@ -104,7 +105,9 @@ const Navbar = () => {
                     </div>
                 </MenubarItem>
                 <MenubarSeparator />
-                <MenubarItem>Main Wallet</MenubarItem>
+                <MenubarItem>
+                    <Wallet />
+                </MenubarItem>
                 <MenubarSeparator />
                 <MenubarItem 
                     className="flex items-center gap-2 cursor-pointer"
