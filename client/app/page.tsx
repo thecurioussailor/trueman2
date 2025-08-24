@@ -1,5 +1,8 @@
+"use client";
+import Markets from "@/components/exchange/Markets";
 import Link from "next/link";
 import { FaDiscord, FaGithub, FaLinkedin, FaXTwitter } from "react-icons/fa6";
+import { Gi3dGlasses } from "react-icons/gi";
 
 export default function Home() {
   return (
@@ -14,14 +17,12 @@ export default function Home() {
       <header className="sticky top-0 z-20 border-b border-white/10 bg-black/20 backdrop-blur">
         <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-4">
           <div className="flex items-center gap-3 font-semibold">
-            <Logo />
-            <span className="tracking-tight">Trueman Exchange</span>
+            <Gi3dGlasses size={24}/>
+            <span className="text-xl font-bold">Trueman</span>
           </div>
           <nav className="hidden md:flex items-center gap-6 text-sm text-zinc-300">
-            <Link href="/user/markets" className="hover:text-white">Markets</Link>
-            <Link href="/user/orders" className="hover:text-white">Orders</Link>
-            <Link href="/user/trades" className="hover:text-white">Trades</Link>
-            <Link href="/fees" className="hover:text-white">Fees</Link>
+            <Link href="/user/markets" className="hover:text-white">Features</Link>
+            <Link href="/user/orders" className="hover:text-white">Markets</Link>
           </nav>
           <div className="flex items-center gap-2">
             <Link href="/login" className="flex justify-center items-center h-9 rounded-lg border border-white/15 px-3 text-sm text-white hover:bg-white/5">
@@ -102,50 +103,12 @@ export default function Home() {
       </section>
 
       {/* Top Markets */}
-      <section className="px-4 pb-16">
+      <section className="px-4 py-10">
         <div className="mx-auto max-w-6xl">
-          <div className="mb-3 flex items-center justify-between">
-            <h2 className="text-lg font-extrabold">Top Markets</h2>
-            <Link href="/user/markets" className="text-sm text-zinc-300 hover:text-white">
-              View all
-            </Link>
-          </div>
-
-          <div className="overflow-hidden rounded-xl border border-white/10 bg-white/5">
-            <table className="w-full border-collapse text-sm">
-              <thead className="bg-white/5 text-zinc-300">
-                <tr>
-                  <th className="px-4 py-3 text-left font-medium">Pair</th>
-                  <th className="px-4 py-3 text-left font-medium">Price</th>
-                  <th className="px-4 py-3 text-left font-medium">24h Change</th>
-                  <th className="px-4 py-3 text-left font-medium">24h Volume</th>
-                </tr>
-              </thead>
-              <tbody>
-                {[
-                  { pair: "BTC/USDC", price: "68,420", change: "+2.4%", vol: "12,345 BTC" },
-                  { pair: "ETH/USDC", price: "3,420", change: "-1.2%", vol: "98,210 ETH" },
-                  { pair: "SOL/USDC", price: "168", change: "+5.1%", vol: "2,340,100 SOL" },
-                ].map((m) => (
-                  <tr key={m.pair} className="border-t border-white/10">
-                    <td className="px-4 py-3">{m.pair}</td>
-                    <td className="px-4 py-3">${m.price}</td>
-                    <td
-                      className={`px-4 py-3 font-semibold ${
-                        m.change.startsWith("+") ? "text-emerald-400" : "text-rose-400"
-                      }`}
-                    >
-                      {m.change}
-                    </td>
-                    <td className="px-4 py-3">{m.vol}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+        <h2 className="text-2xl font-bold pl-4">Top Markets</h2>
+          <Markets/>
         </div>
       </section>
-
       {/* Footer */}
       <footer className="border-t border-white/10 bg-black/20">
         <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-6 text-sm text-zinc-300">
@@ -183,7 +146,7 @@ function Card({
   icon: React.ReactNode;
 }) {
   return (
-    <div className="h-full rounded-2xl border border-white/10 bg-gradient-to-b from-white/10 to-white/5 p-5">
+    <div className="h-full rounded-2xl border border-white/10 bg-black/5 bg-gradient-to-b from-white/5 to-white/1 p-5">
       <div className="mb-3 text-zinc-300">{icon}</div>
       <div className="mb-1 font-bold">{title}</div>
       <div className="text-sm text-zinc-300">{desc}</div>
