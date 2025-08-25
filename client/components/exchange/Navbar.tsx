@@ -16,7 +16,6 @@ import {
 import { CgProfile } from "react-icons/cg";
 import { useAuth } from "@/store/auth";
 import { useRouter } from "next/navigation";
-import jim from "@/public/jim-carrey.svg";
 import { IoSearch } from "react-icons/io5";
 import Wallet from "./Wallet";
 import { Gi3dGlasses } from "react-icons/gi";
@@ -132,17 +131,3 @@ const Navbar = () => {
 }
 
 export default Navbar
-
-function Logo() {
-    return (
-      <svg width="26" height="26" viewBox="0 0 24 24" aria-hidden className="block">
-        <defs>
-          <linearGradient id="gx" x1="0" y1="0" x2="1" y2="1">
-            <stop offset="0%" stopColor="#7C3AED" />
-            <stop offset="100%" stopColor="#06B6D4" />
-          </linearGradient>
-        </defs>
-        <path fill="url(#gx)" d="M12 2l9 5v10l-9 5-9-5V7l9-5zm0 2.2L5 7v8l7 3.8L19 15V7l-7-2.8z" />
-      </svg>
-    );
-  }

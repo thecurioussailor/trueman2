@@ -21,13 +21,16 @@ export default function ExchangePage() {
         <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-6 text-sm text-zinc-300">
           <div>© {new Date().getFullYear()} Trueman Exchange</div>
           <div className="flex items-center gap-4">
-             <span className="text-zinc-400">Made with ❤️ by</span>
-            <Link href="https://x.com/sagar11ashutosh" target="_blank" className="hover:text-white">
-              <FaXTwitter />  
-            </Link>
+            <Link href="https://x.com/sagar11ashutosh" target="_blank" className="hover:text-white"><FaXTwitter /></Link>
             <Link href="https://github.com/thecurioussailor" target="_blank" className="hover:text-white"><FaGithub /></Link>
-            <Link href="https://discord.gg/Xuj3hdYS" target="_blank" className="hover:text-white"><FaDiscord /></Link>
             <Link href="https://www.linkedin.com/in/ashutosh-sagar-4b2612185/" target="_blank" className="hover:text-white"><FaLinkedin /></Link>
+            <Link
+              href="https://discord.gg/CZQ4rjNF"
+              target="_blank"
+              className="flex items-center gap-2 rounded-lg bg-gradient-to-r from-violet-500 to-cyan-400 px-3 py-1 text-sm font-semibold text-black hover:brightness-110"
+            >
+              <FaDiscord /> Join Discord
+            </Link>
           </div>
         </div>
       </footer>
