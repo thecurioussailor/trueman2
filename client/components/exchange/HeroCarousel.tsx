@@ -40,33 +40,25 @@ const SLIDES: Slide[] = [
     image: "/elonmusk.jpg",
   },
   {
-    title: "The World is Changing",
-    subtitle: "You can't stop things like Bitcoin. It will be everywhere, and the world will have to readjust. World governments will have to readjust.",
-    cta: { label: "John McAfee", href: "/exchange?tab=deposit" },
+    title: "Freedom of Money",
+    subtitle: "The best time to invest in Bitcoin was yesterday; the second-best time is today.",
+    cta: { label: "Anonymous", href: "/exchange?tab=deposit" },
     bgClass:
       "bg-gradient-to-br from-emerald-600/25 to-emerald-400/10",
     image: "/peaky.jpg",
   },
   {
-    title: "The World is Changing",
-    subtitle: "You can't stop things like Bitcoin. It will be everywhere, and the world will have to readjust. World governments will have to readjust.",
-    cta: { label: "John McAfee", href: "/exchange?tab=deposit" },
-    bgClass:
-      "bg-gradient-to-br from-emerald-600/25 to-emerald-400/10",
-    image: "/satoshinakamoto.jpg",
-  },
-  {
-    title: "The World is Changing",
-    subtitle: "You can't stop things like Bitcoin. It will be everywhere, and the world will have to readjust. World governments will have to readjust.",
-    cta: { label: "John McAfee", href: "/exchange?tab=deposit" },
+    title: "Rewriting the Rules of Money",
+    subtitle: "Bitcoin will do to banks what email did to the postal industry.",
+    cta: { label: "Rick Falkvinge", href: "/exchange?tab=deposit" },
     bgClass:
       "bg-gradient-to-br from-emerald-600/25 to-emerald-400/10",
     image: "/happiness.jpg",
   },
   {
-    title: "The World is Changing",
-    subtitle: "You can't stop things like Bitcoin. It will be everywhere, and the world will have to readjust. World governments will have to readjust.",
-    cta: { label: "John McAfee", href: "/exchange?tab=deposit" },
+    title: "The End of Evolution",
+    subtitle: "Gold was the past. Fiat is the present. Bitcoin is the future.",
+    cta: { label: "Anonymous", href: "/exchange?tab=deposit" },
     bgClass:
       "bg-gradient-to-br from-emerald-600/25 to-emerald-400/10",
     image: "/evolution.jpg",
@@ -147,7 +139,7 @@ export default function HeroCarousel() {
 )}
               
               <div className="relative z-10 flex h-full flex-col justify-center gap-4 px-20 text-left">
-                <h2 className="text-3xl font-extrabold md:text-5xl">{s.title}</h2>
+                <h2 className="text-3xl font-extrabold md:text-5xl w-1/2">{s.title}</h2>
                 {s.subtitle && (
                   <p className="max-w-xl text-zinc-300 text-2xl">"{s.subtitle}"</p>
                 )}

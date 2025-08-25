@@ -19,6 +19,7 @@ import { useRouter } from "next/navigation";
 import jim from "@/public/jim-carrey.svg";
 import { IoSearch } from "react-icons/io5";
 import Wallet from "./Wallet";
+import { Gi3dGlasses } from "react-icons/gi";
 type Market = {
     symbol: string;    // e.g. "SOL/USDC"
     price: string;     // e.g. "168.24"
@@ -49,8 +50,10 @@ const Navbar = () => {
     <div className="mx-auto flex h-16 max-w-7xl items-center gap-3 px-4">
       {/* Left: Logo + name */}
       <Link href="/" className="flex items-center gap-2">
-        <Logo />
-        <span className="hidden text-sm font-semibold tracking-tight sm:inline">Trueman</span>
+      <div className="flex items-center gap-3 font-semibold">
+            <Gi3dGlasses size={24}/>
+            <span className="text-xl font-bold">Trueman</span>
+          </div>
       </Link>
 
       {/* Middle: Search + Spot pill */}

@@ -20,9 +20,10 @@ export default function Home() {
             <Gi3dGlasses size={24}/>
             <span className="text-xl font-bold">Trueman</span>
           </div>
-          <nav className="hidden md:flex items-center gap-6 text-sm text-zinc-300">
+          <nav className="hidden md:flex items-center gap-6 text-sm font-semibold text-zinc-300">
             <Link href="/user/markets" className="hover:text-white">Features</Link>
             <Link href="/user/orders" className="hover:text-white">Markets</Link>
+            <Link href="/user/orders" className="hover:text-white">Leaderboard</Link>
           </nav>
           <div className="flex items-center gap-2">
             <Link href="/login" className="flex justify-center items-center h-9 rounded-lg border border-white/15 px-3 text-sm text-white hover:bg-white/5">
@@ -39,9 +40,17 @@ export default function Home() {
       </header>
 
       {/* Hero */}
-      <section className="px-4 py-24">
-        <div className="mx-auto max-w-5xl py-16 text-center">
-          <h1 className="mx-auto max-w-4xl text-4xl font-extrabold leading-tight tracking-tight sm:text-6xl">
+      <section className="px-4 py-20">
+        <div className="mx-auto max-w-5xl py-8 text-center">
+          <div className="inline-block rounded-full bg-violet-600/20 px-3 py-1 text-xs font-semibold text-violet-300 mb-4">
+            🚀 Demo Project – Risk-free trading simulator
+          </div>
+          <div className="mt-2 overflow-hidden whitespace-nowrap text-xs text-zinc-300">
+            <span className="mx-4 tracking-wider">BTC/USDC: $65,200 ▲1.2%</span>
+            <span className="mx-4 tracking-wider">ETH/USDC: $3,500 ▼0.8%</span>
+            <span className="mx-4 tracking-wider">SOL/USDC: $180 ▲3.5%</span>
+          </div>
+          <h1 className="mx-auto max-w-4xl text-4xl font-extrabold leading-tight sm:text-6xl">
             Trade crypto with confidence on{" "}
             <span className="bg-gradient-to-r from-violet-400 to-cyan-300 bg-clip-text text-transparent">
               Trueman Exchange
@@ -61,7 +70,7 @@ export default function Home() {
               href="/login"
               className="flex justify-center items-center h-11 rounded-xl border border-white/15 bg-white/5 px-5 text-sm font-semibold text-white hover:bg-white/10"
             >
-              Launch App
+              Try Demo Trading
             </Link>
           </div>
 
@@ -109,20 +118,46 @@ export default function Home() {
           <Markets/>
         </div>
       </section>
-      {/* Footer */}
-      <footer className="border-t border-white/10 bg-black/20">
-        <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-6 text-sm text-zinc-300">
-          <div>© {new Date().getFullYear()} Trueman Exchange</div>
-          <div className="flex gap-4">
-            <Link href="https://x.com/sagar11ashutosh" target="_blank" className="hover:text-white">
-              <FaXTwitter />  
-            </Link>
-            <Link href="https://github.com/thecurioussailor" target="_blank" className="hover:text-white"><FaGithub /></Link>
-            <Link href="https://discord.gg/Xuj3hdYS" target="_blank" className="hover:text-white"><FaDiscord /></Link>
-            <Link href="https://www.linkedin.com/in/ashutosh-sagar-4b2612185/" target="_blank" className="hover:text-white"><FaLinkedin /></Link>
+      <section className="px-4 py-10">
+        <div className="mx-auto max-w-6xl">
+          <h2 className="text-2xl font-bold mb-4">Leaderboard (Coming Soon)</h2>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div className="p-4 rounded-xl border border-white/10 bg-white/5">
+              <div className="font-bold">Alice</div>
+              <div className="text-sm text-green-400">+45% PnL</div>
+            </div>
+            <div className="p-4 rounded-xl border border-white/10 bg-white/5">
+              <div className="font-bold">Bob</div>
+              <div className="text-sm text-green-400">+32% PnL</div>
+            </div>
+            <div className="p-4 rounded-xl border border-white/10 bg-white/5">
+              <div className="font-bold">Charlie</div>
+              <div className="text-sm text-green-400">+20% PnL</div>
+            </div>
           </div>
         </div>
-      </footer>
+      </section>
+
+      {/* Footer */}
+      <footer className="border-t border-white/10 bg-black/20">
+  <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-6 text-sm text-zinc-300">
+    <div>© {new Date().getFullYear()} Trueman Exchange</div>
+    <div className="flex items-center gap-4">
+      <Link
+        href="https://discord.gg/CZQ4rjNF"
+        target="_blank"
+        className="flex items-center gap-2 rounded-lg bg-gradient-to-r from-violet-500 to-cyan-400 px-3 py-1 text-sm font-semibold text-black hover:brightness-110"
+      >
+        <FaDiscord /> Join Discord
+      </Link>
+      <Link href="https://x.com/sagar11ashutosh" target="_blank" className="hover:text-white"><FaXTwitter /></Link>
+      <Link href="https://github.com/thecurioussailor" target="_blank" className="hover:text-white"><FaGithub /></Link>
+      <Link href="https://www.linkedin.com/in/ashutosh-sagar-4b2612185/" target="_blank" className="hover:text-white"><FaLinkedin /></Link>
+    </div>
+  </div>
+</footer>
+
+
     </main>
   );
 }
@@ -151,20 +186,6 @@ function Card({
       <div className="mb-1 font-bold">{title}</div>
       <div className="text-sm text-zinc-300">{desc}</div>
     </div>
-  );
-}
-
-function Logo() {
-  return (
-    <svg width="26" height="26" viewBox="0 0 24 24" aria-hidden className="block">
-      <defs>
-        <linearGradient id="gx" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0%" stopColor="#7C3AED" />
-          <stop offset="100%" stopColor="#06B6D4" />
-        </linearGradient>
-      </defs>
-      <path fill="url(#gx)" d="M12 2l9 5v10l-9 5-9-5V7l9-5zm0 2.2L5 7v8l7 3.8L19 15V7l-7-2.8z" />
-    </svg>
   );
 }
 
