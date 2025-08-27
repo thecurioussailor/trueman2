@@ -9,7 +9,8 @@ use diesel::prelude::*;
 use database::{establish_connection, Market, Token, schema::{markets, tokens}};
 use crate::decimal_utils::{
     price_from_atomic_units, quantity_from_atomic_units,
-    EnhancedDepthUpdate, EnhancedMarketTicker, convert_ticker_to_decimal
+    EnhancedDepthUpdate, EnhancedMarketTicker, convert_ticker_to_decimal,
+    convert_trade_to_decimal, format_price_to_tick_precision, format_quantity_to_precision
 };
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Order {
@@ -232,7 +233,19 @@ impl TradingEngine {
         if matches!(updated_order.order_kind, OrderKind::Market) {
             match updated_order.order_type {
                 OrderType::Buy => {
-                    let executed_cost: i64 = trades.iter().map(|t| t.price * t.quantity).sum();
+                    let market = self.markets.get(&updated_order.market_id).unwrap();
+                    let mut executed_cost = 0i64;
+                    
+                    // Calculate executed cost using safe_multiply_divide for each trade
+                    for trade in &trades {
+                        match self.safe_multiply_divide(trade.price, trade.quantity, market.base_currency.decimals) {
+                            Ok(cost) => executed_cost += cost,
+                            Err(e) => {
+                                tracing::error!("Error calculating trade cost for refund: {}", e);
+                                // Continue with other trades, don't fail the entire order
+                            }
+                        }
+                    }
                     if reservation.token_id == self.markets.get(&updated_order.market_id).unwrap().quote_currency.id {
                         let refund = reservation.amount.saturating_sub(executed_cost);
                         if refund > 0 {
@@ -278,7 +291,7 @@ impl TradingEngine {
             message: "Order processed successfully".to_string(),
             filled_quantity: Some(updated_order.filled_quantity),
             remaining_quantity: Some(updated_order.quantity - updated_order.filled_quantity),
-            average_price: self.calculate_average_price(&trades),
+            average_price: self.calculate_average_price(&trades, market_id),
             trades: Some(trades.into_iter().map(|t| crate::redis_manager::TradeInfo {
                 trade_id: t.id,
                 price: t.price,
@@ -389,15 +402,19 @@ async fn publish_depth(&mut self, market_id: Uuid) {
         if let Some(market_info) = self.markets.get(&market_id) {
             // Convert to decimal format
             let bids_decimal: Vec<(f64, f64)> = bids_atomic.iter().map(|&(price, quantity)| {
-                let price_decimal = price_from_atomic_units(price, market_info);
-                let quantity_decimal = quantity_from_atomic_units(quantity, market_info);
-                (price_decimal, quantity_decimal)
+                let raw_price = price_from_atomic_units(price, market_info);
+                let raw_quantity = quantity_from_atomic_units(quantity, market_info);
+                let formatted_price = format_price_to_tick_precision(raw_price, market_info.tick_size, market_info.quote_currency.decimals);
+                let formatted_quantity = format_quantity_to_precision(raw_quantity, market_info.min_order_size, market_info.base_currency.decimals);
+                (formatted_price, formatted_quantity)
             }).collect();
 
             let asks_decimal: Vec<(f64, f64)> = asks_atomic.iter().map(|&(price, quantity)| {
-                let price_decimal = price_from_atomic_units(price, market_info);
-                let quantity_decimal = quantity_from_atomic_units(quantity, market_info);
-                (price_decimal, quantity_decimal)
+                let raw_price = price_from_atomic_units(price, market_info);
+                let raw_quantity = quantity_from_atomic_units(quantity, market_info);
+                let formatted_price = format_price_to_tick_precision(raw_price, market_info.tick_size, market_info.quote_currency.decimals);
+                let formatted_quantity = format_quantity_to_precision(raw_quantity, market_info.min_order_size, market_info.base_currency.decimals);
+                (formatted_price, formatted_quantity)
             }).collect();
 
             let seq = self.depth_seq.entry(market_id).and_modify(|s| *s += 1).or_insert(1);
@@ -439,12 +456,17 @@ async fn publish_ticker(&mut self, market_id: Uuid) {
     
     async fn publish_trades(&mut self, market_id: Uuid, trades: &[Trade]) {
         if trades.is_empty() { return; }
-        let mut conn = self.redis_manager.clone();
-        for trade in trades {
-            let _: Result<(), _> = conn.publish(
-                format!("trades:{}", market_id),
-                serde_json::to_string(trade).unwrap()
-            ).await;
+        if let Some(market_info) = self.markets.get(&market_id) {
+            let mut conn = self.redis_manager.clone();
+            for trade in trades {
+                // Convert trade to decimal format
+                let enhanced_trade = convert_trade_to_decimal(trade, market_info);
+                
+                let _: Result<(), _> = conn.publish(
+                    format!("trades:{}", market_id),
+                    serde_json::to_string(&enhanced_trade).unwrap()
+                ).await;
+            }
         }
     }
     // KEEP THIS FUNCTION
@@ -652,7 +674,7 @@ async fn publish_ticker(&mut self, market_id: Uuid) {
                     matching_order.filled_quantity += trade_quantity;
                     remaining_quantity -= trade_quantity;
 
-                    tracing::info!("✅ Limit order trade: {} {} @ {} in {}", 
+                    tracing::info!("Limit order trade: {} {} @ {} in {}", 
                         trade_quantity, 
                         market_info.base_currency.symbol, 
                         price, 
@@ -729,8 +751,7 @@ async fn publish_ticker(&mut self, market_id: Uuid) {
             let base_id  = market_info.base_currency.id;
 
              // FIXED: Correct calculation for trade cost
-            let base_multiplier = 10_i64.pow(market_info.base_currency.decimals as u32);
-            let cost = self.safe_multiply_divide(trade.price, trade.quantity, base_multiplier).unwrap();
+            let cost = self.safe_multiply_divide(trade.price, trade.quantity, market_info.base_currency.decimals).unwrap();
             // Buyer: spend quote (locked if resting limit or immediate if market), credit base
             let buyer_qoute_locked_now = self.balances.get(&buyer_id)
                 .and_then(|ub| ub.token_balances.get(&quote_id))
@@ -1066,15 +1087,51 @@ async fn publish_ticker(&mut self, market_id: Uuid) {
         }
     }
     
-    fn calculate_average_price(&self, trades: &[Trade]) -> Option<i64> {
+    fn calculate_average_price(&self, trades: &[Trade], market_id: Uuid) -> Option<i64> {
         if trades.is_empty() {
             return None;
         }
+        let market = self.markets.get(&market_id)?;
+        let mut total_value = 0i64;
+        let mut total_quantity = 0i64;
+
+        // Calculate total value using safe_multiply_divide for each trade
+        for trade in trades {
+            match self.safe_multiply_divide(trade.price, trade.quantity, market.base_currency.decimals) {
+                Ok(value) => total_value += value,
+                Err(e) => {
+                    tracing::error!("Error calculating trade value for average price: {}", e);
+                    return None; // If any calculation fails, we can't compute average
+                }
+            }
+            total_quantity += trade.quantity;
+        }
         
-        let total_value: i64 = trades.iter().map(|t| t.price * t.quantity).sum();
-        let total_quantity: i64 = trades.iter().map(|t| t.quantity).sum();
+        if total_quantity == 0 {
+            return None;
+        }
         
-        Some(total_value / total_quantity)
+        // Calculate average price: total_value / total_quantity
+        // But we need to reverse the division we did in safe_multiply_divide
+        // So we multiply by the base_multiplier again
+        let decimals = market.base_currency.decimals;
+        if decimals > 18 {
+            tracing::error!("Decimals {} exceeds maximum supported (18)", decimals);
+            return None;
+        }
+        
+        let total_value_u256 = U256::from(total_value as u64);
+        let total_quantity_u256 = U256::from(total_quantity as u64);
+        let multiplier_u256 = U256::from(10u64).pow(U256::from(decimals as u64));
+        
+        let result = (total_value_u256 * multiplier_u256) / total_quantity_u256;
+        
+        if result > U256::from(i64::MAX as u64) {
+            tracing::error!("Average price calculation exceeds i64::MAX");
+            return None;
+        }
+        
+        Some(result.as_u64() as i64)
     }
     
     // fn create_orderbook_snapshot(&self, orderbook: &OrderBook) -> OrderBookSnapshot {
@@ -1387,149 +1444,19 @@ async fn publish_ticker(&mut self, market_id: Uuid) {
         Ok(())
     }
 
-    // Enhanced balance validation with token symbols for better logging
-    // async fn validate_order_balance(&self, order: &Order) -> bool {
-    //     // Get market information
-    //     let market = match self.markets.get(&order.market_id) {
-    //         Some(market) => market,
-    //         None => {
-    //             tracing::error!("❌ Market not found: {}", order.market_id);
-    //             return false;
-    //         }
-    //     };
-        
-    //     // Get user balance
-    //     let user_balance = match self.balances.get(&order.user_id) {
-    //         Some(balance) => balance,
-    //         None => {
-    //             tracing::warn!("❌ No balance found for user: {} in market {}", 
-    //                 order.user_id, market.symbol);
-    //             return false;
-    //         }
-    //     };
-
-    //     // For resting limit orders: lock upfront
-    //     if matches!(order.order_kind, OrderKind::Limit) {
-    //         match order.order_type {
-    //             OrderType::Buy => {
-    //                 let price = order.price.ok_or_else(|| {
-    //                     tracing::warn!("❌ Limit buy without price");
-    //                 });
-    //                 if order.price.is_none() {
-    //                     return crate::redis_manager::OrderResponse {
-    //                         request_id: order_request.request_id, success: false, status: "REJECTED".to_string(),
-    //                         order_id: None, message: "Limit buy requires price".to_string(),
-    //                         filled_quantity: None, remaining_quantity: None, average_price: None, trades: None
-    //                     };
-    //                 }
-    //                 let need = order.price.unwrap() * order.quantity;
-    //                 if let Err(e) = self.lock(order.user_id, market.quote_currency.id, need).await {
-    //                     tracing::warn!("❌ Order rejected: {}", e);
-    //                     return crate::redis_manager::OrderResponse {
-    //                         request_id: order_request.request_id, success: false, status: "REJECTED".to_string(),
-    //                         order_id: None, message: e.to_string(), filled_quantity: None, remaining_quantity: None,
-    //                         average_price: None, trades: None
-    //                     };
-    //                 }
-    //             }
-    //             OrderType::Sell => {
-    //                 if let Err(e) = self.lock(order.user_id, market.base_currency.id, order.quantity).await {
-    //                     tracing::warn!("❌ Order rejected: {}", e);
-    //                     return crate::redis_manager::OrderResponse {
-    //                         request_id: order_request.request_id, success: false, status: "REJECTED".to_string(),
-    //                         order_id: None, message: e.to_string(), filled_quantity: None, remaining_quantity: None,
-    //                         average_price: None, trades: None
-    //                     };
-    //                 }
-    //             }
-    //         }
-    //     }
-        
-    //     match order.order_type {
-    //         OrderType::Buy => {
-    //             // For buy orders, user needs sufficient quote currency (usually USDC)
-    //             let required_token_id = market.quote_currency.id;
-    //             let required_amount = match order.price {
-    //                 Some(price) => price * order.quantity,
-    //                 None => {
-    //                     // Market order - estimate against current best ask price
-    //                     let estimated_price = self.estimate_market_buy_price(order.market_id, order.quantity);
-    //                     match estimated_price {
-    //                         Some(price) => price * order.quantity,
-    //                         None => {
-    //                             tracing::warn!("❌ No liquidity available for market buy in {} market", 
-    //                                 market.symbol);
-    //                             return false;
-    //                         }
-    //                     }
-    //                 }
-    //             };
-                
-    //             if let Some(token_balance) = user_balance.token_balances.get(&required_token_id) {
-    //                 let has_sufficient = token_balance.available >= required_amount;
-    //                 if !has_sufficient {
-    //                     tracing::warn!(
-    //                         "❌ Insufficient {} balance for BUY order in {} market. Required: {}, Available: {}", 
-    //                         market.quote_currency.symbol,
-    //                         market.symbol,
-    //                         required_amount, 
-    //                         token_balance.available
-    //                     );
-    //                 } else {
-    //                     tracing::info!(
-    //                         "✅ Sufficient {} balance for BUY order in {} market. Required: {}, Available: {}", 
-    //                         market.quote_currency.symbol,
-    //                         market.symbol,
-    //                         required_amount, 
-    //                         token_balance.available
-    //                     );
-    //                 }
-    //                 has_sufficient
-    //             } else {
-    //                 tracing::warn!("❌ No {} balance found for user in {} market", 
-    //                     market.quote_currency.symbol, market.symbol);
-    //                 false
-    //             }
-    //         }
-    //         OrderType::Sell => {
-    //             // For sell orders, user needs sufficient base currency (SOL/BTC/ETH)
-    //             let required_token_id = market.base_currency.id;
-    //             let required_amount = order.quantity;
-                
-    //             if let Some(token_balance) = user_balance.token_balances.get(&required_token_id) {
-    //                 let has_sufficient = token_balance.available >= required_amount;
-    //                 if !has_sufficient {
-    //                     tracing::warn!(
-    //                         "❌ Insufficient {} balance for SELL order in {} market. Required: {}, Available: {}", 
-    //                         market.base_currency.symbol,
-    //                         market.symbol,
-    //                         required_amount, 
-    //                         token_balance.available
-    //                     );
-    //                 } else {
-    //                     tracing::info!(
-    //                         "✅ Sufficient {} balance for SELL order in {} market. Required: {}, Available: {}", 
-    //                         market.base_currency.symbol,
-    //                         market.symbol,
-    //                         required_amount, 
-    //                         token_balance.available
-    //                     );
-    //                 }
-    //                 has_sufficient
-    //             } else {
-    //                 tracing::warn!("❌ No {} balance found for user in {} market", 
-    //                     market.base_currency.symbol, market.symbol);
-    //                 false
-    //             }
-    //         }
-    //     }
-    // }
-    
     // Add this helper function
-    fn safe_multiply_divide(&self, price: i64, quantity: i64, divisor: i64) -> Result<i64, String> {
+    fn safe_multiply_divide(&self, price: i64, quantity: i64, decimals: i32) -> Result<i64, String> {
+        
+        if price < 0 || quantity < 0 {
+            return Err("Price and quantity must be non-negative".to_string());
+        }
+        
+        if decimals > 18 {
+            return Err(format!("Decimals {} exceeds maximum supported (18)", decimals));
+        }
         let price_u256 = U256::from(price as u64);
         let quantity_u256 = U256::from(quantity as u64);
-        let divisor_u256 = U256::from(divisor as u64);
+        let divisor_u256 = U256::from(10u64).pow(U256::from(decimals as u64));
         
         let result = (price_u256 * quantity_u256) / divisor_u256;
         
@@ -1556,15 +1483,13 @@ async fn publish_ticker(&mut self, market_id: Uuid) {
                 let required_quote = match order.order_kind {
                     OrderKind::Limit => {
                         let price = order.price.ok_or_else(|| "Limit buy requires price".to_string())?;
-                        let base_multiplier = 10_i64.pow(market.base_currency.decimals as u32);
-                        self.safe_multiply_divide(price, order.quantity, base_multiplier)?
+                        self.safe_multiply_divide(price, order.quantity, market.base_currency.decimals)?
                     }
                     OrderKind::Market => {
                         // Estimate cost for market buy; if no liquidity, reject
                         let est = self.estimate_market_buy_price(order.market_id, order.quantity)
                             .ok_or_else(|| format!("No liquidity available for market buy in {}", market.symbol))?;
-                        let base_multiplier = 10_i64.pow(market.base_currency.decimals as u32);
-                        self.safe_multiply_divide(est, order.quantity, base_multiplier)?
+                        self.safe_multiply_divide(est, order.quantity, market.base_currency.decimals)?
                     }
                 };
 
@@ -1625,9 +1550,14 @@ async fn publish_ticker(&mut self, market_id: Uuid) {
             
             let quantity_to_buy = remaining_quantity.min(available_at_price);
             
-            // CORRECT calculation: (price * quantity) / base_multiplier
-            let base_multiplier = 10_i64.pow(market.base_currency.decimals as u32);
-            total_cost += (price * quantity_to_buy) / base_multiplier;
+            // FIX: Use safe_multiply_divide to avoid overflow
+            match self.safe_multiply_divide(price, quantity_to_buy, market.base_currency.decimals) {
+                Ok(cost) => total_cost += cost,
+                Err(e) => {
+                    tracing::error!("Error calculating cost in estimate_market_buy_price: {}", e);
+                    return None;
+                }
+            }
             remaining_quantity -= quantity_to_buy;
         }
         
@@ -1640,8 +1570,25 @@ async fn publish_ticker(&mut self, market_id: Uuid) {
             }
         } else {
             // We can fulfill the order - return average price
-            let base_multiplier = 10_i64.pow(market.base_currency.decimals as u32);
-            Some((total_cost * base_multiplier) / quantity)
+            // FIX: Use U256 for the reverse calculation to avoid overflow
+            let decimals = market.base_currency.decimals;
+            if decimals > 18 {
+                tracing::error!("Decimals {} exceeds maximum supported (18)", decimals);
+                return None;
+            }
+            
+            let total_cost_u256 = U256::from(total_cost as u64);
+            let quantity_u256 = U256::from(quantity as u64);
+            let multiplier_u256 = U256::from(10u64).pow(U256::from(decimals as u64));
+            
+            let result = (total_cost_u256 * multiplier_u256) / quantity_u256;
+            
+            if result > U256::from(i64::MAX as u64) {
+                tracing::error!("Average price calculation exceeds i64::MAX");
+                return None;
+            }
+            
+            Some(result.as_u64() as i64)
         }
     }
 
@@ -1680,8 +1627,17 @@ async fn publish_ticker(&mut self, market_id: Uuid) {
                         if matches!(order.order_kind, OrderKind::Limit) {
                             if let Some(price) = order.price {
                                 // unlock remaining quote = remaining * price
-                                let quote_id = self.markets[&order.market_id].quote_currency.id;
-                                self.unlock(order.user_id, quote_id, remaining * price).await;
+                                let market = &self.markets[&order.market_id];
+                                match self.safe_multiply_divide(price, remaining, market.base_currency.decimals) {
+                                    Ok(quote_amount) => {
+                                        let quote_id = market.quote_currency.id;
+                                        self.unlock(order.user_id, quote_id, quote_amount).await;
+                                    }
+                                    Err(e) => {
+                                        tracing::error!("Error calculating unlock amount for cancelled buy order: {}", e);
+                                        // You might want to handle this error more gracefully
+                                    }
+                                }
                             }
                         }
                     }

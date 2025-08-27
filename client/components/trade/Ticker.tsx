@@ -1,10 +1,46 @@
 import { useMarketFeedStore } from "@/store/marketFeed";
 import { useEffect, useState } from "react";
 import Image from "next/image";
-
+import { useMarkets } from "@/store/markets";
+import { useMemo } from "react";
 const Ticker = ({ symbol, marketId }: { symbol: string, marketId: string }) => {
   const ticker = useMarketFeedStore(s => s.tickerByMarket[marketId]);
+  const { markets } = useMarkets();
   const [image, setImage] = useState<string | null>(null);
+  // Find the current market
+  const market = useMemo(() => 
+    markets.find(m => m.id === marketId), 
+    [markets, marketId]
+  );
+
+  // Calculate decimal constraints
+  const constraints = useMemo(() => {
+    if (!market) return null;
+
+    const minOrderSizeDecimal = market.min_order_size / Math.pow(10, market.base_currency.decimals);
+    const tickSizeDecimal = market.tick_size / Math.pow(10, market.quote_currency.decimals);
+
+    return {
+      minOrderSize: minOrderSizeDecimal,
+      tickSize: tickSizeDecimal,
+      baseDecimals: market.base_currency.decimals,
+      quoteDecimals: market.quote_currency.decimals,
+    };
+  }, [market]);
+
+   // Calculate decimal places for price and quantity
+   const priceDecimals = useMemo(() => {
+    if (!constraints) return 2;
+    const tickSizeDecimal = constraints.tickSize;
+    return Math.max(0, -Math.floor(Math.log10(tickSizeDecimal)));
+  }, [constraints]);
+
+  const quantityDecimals = useMemo(() => {
+    if (!constraints) return 2;
+    const minOrderDecimal = constraints.minOrderSize;
+    return Math.max(0, -Math.floor(Math.log10(minOrderDecimal)));
+  }, [constraints]);
+
   useEffect(() => {
     console.log("symbol", symbol);
     if(symbol) {
@@ -20,10 +56,10 @@ const Ticker = ({ symbol, marketId }: { symbol: string, marketId: string }) => {
           <span className="text-sm font-semibold">{symbol}</span>
         </div>
       </div>
-      <Metric label="Price" value={ticker?.last_price.toFixed(2)} />
+      <Metric label="Price" value={ticker?.last_price.toFixed(priceDecimals)} />
       <Metric label="24H Change" value={`${ticker?.change_24h.toFixed(2)}%`} pos={ticker?.change_24h > 0} />
-      <Metric label="24H High / Low" value={`${ticker?.high_24h.toFixed(2)} / ${ticker?.low_24h.toFixed(2)}`} />
-      <Metric label="24H Volume" value={ticker?.volume_24h.toLocaleString()} />
+      <Metric label="24H High / Low" value={`${ticker?.high_24h.toFixed(priceDecimals)} / ${ticker?.low_24h.toFixed(priceDecimals)}`} />
+      <Metric label="24H Volume" value={ticker?.volume_24h.toFixed(quantityDecimals)} />
     </div>
   </section>
   )
