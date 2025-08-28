@@ -1,0 +1,82 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: trueman-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    container_name: trueman-redis
+    ports:
+      - "6379:6379"
+
+  api:
+    build:
+      context: ./api
+    container_name: trueman-api
+    environment:
+      DATABASE_URL: postgres://postgres:password@postgres:5432/postgres
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      - postgres
+      - redis
+    ports:
+      - "8080:8080"
+
+  engine:
+    build:
+      context: ./engine
+    container_name: trueman-engine
+    environment:
+      DATABASE_URL: postgres://postgres:password@postgres:5432/postgres
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      - postgres
+      - redis
+
+  db-updater:
+    build:
+      context: ./db-updater
+    container_name: trueman-db-updater
+    environment:
+      DATABASE_URL: postgres://postgres:password@postgres:5432/postgres
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      - postgres
+      - redis
+
+  ws:
+    build:
+      context: ./ws
+    container_name: trueman-ws
+    environment:
+      DATABASE_URL: postgres://postgres:password@postgres:5432/postgres
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      - postgres
+      - redis
+    ports:
+      - "9000:9000"
+
+  simulator:
+    build:
+      context: ./simulator
+    container_name: trueman-simulator
+    environment:
+      DATABASE_URL: postgres://postgres:password@postgres:5432/postgres
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      - postgres
+      - redis
+
+volumes:
+  postgres_data:
