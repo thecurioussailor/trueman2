@@ -11,7 +11,7 @@ type Listener = (msg: WsEvent) => void;
 class WsClient {
   private ws: WebSocket | null = null;
   private listeners = new Set<Listener>();
-  private url = 'ws://localhost:9000/ws';
+  private url = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:9000/ws';
   private wantSubscribe: { marketId?: string; feeds?: Feed[] } = {};
   private reconnectTimer?: number;
 
