@@ -11,6 +11,7 @@ import {
 import { Input } from "@/components/ui/input"
 import { useBalances } from "@/store/balances";
 import { ChevronDown, ChevronUp } from "lucide-react";
+import { toast } from "sonner";
 
 type Props = { open: boolean; onOpenChange: (open: boolean) => void };
 type Token = {
@@ -142,14 +143,16 @@ export default function DepositDialog({ open, onOpenChange }: Props) {
             Cancel
           </button>
           <button
-            disabled={submitting}
+            disabled={submitting || !asset || !network || !amount || parseFloat(amount) <= 0}
             onClick={async () => {
               setSubmitting(true);
               try {
                 await deposit(asset.id, Number(amount));
+                setAmount("");
+                toast.success("Deposit successful");
                 onOpenChange(false);
-              } catch (error) {
-                console.error(error);
+              } catch (error: any) {
+                toast.error("Insufficient funds");
               } finally {   
                 setSubmitting(false);
               }

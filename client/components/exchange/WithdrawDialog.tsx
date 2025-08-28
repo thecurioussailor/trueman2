@@ -13,6 +13,7 @@ import { Input } from "@/components/ui/input"
 import { useBalances } from "@/store/balances";
 import { useTokens } from "@/store/tokens";
 import { ChevronDown, ChevronUp } from "lucide-react";
+import { toast } from "sonner";
 type Token = {
     id: string;
     symbol: "SOL" | "ETH" | "USDC" | "BTC";
@@ -162,15 +163,17 @@ export default function WithdrawDialog({ open, onOpenChange }: Props) {
             Cancel
           </button>
           <button
-            disabled={submitting}
+            disabled={submitting || !asset || !network || !amount || parseFloat(amount) <= 0}
             onClick={async () => {
               setSubmitting(true);
               try {
                 await withdraw(asset?.id || "", Number(amount));
+                setAmount("");
+                toast.success("Withdrawal successful");
                 await loadBalances();
                 onOpenChange(false);
-              } catch (error) {
-                console.error(error);
+              } catch (error: any) {
+                toast.error("Insufficient funds");
               } finally {   
                 setSubmitting(false);
               }

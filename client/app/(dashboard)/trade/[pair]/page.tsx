@@ -42,7 +42,7 @@ async function getMidClient(ex: "BINANCE" | "COINBASE", sym: string): Promise<nu
   }
 }
 
-export async function fetchStartMidTruncated(pair: string, fallback = 120): Promise<number> {
+async function fetchStartMidTruncated(pair: string, fallback = 120): Promise<number> {
   try {
     const { ex, sym } = mapPair(pair);
     const mid = await getMidClient(ex, sym);

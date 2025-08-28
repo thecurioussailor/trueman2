@@ -61,12 +61,14 @@ export default function Home() {
           </p>
           <div className="mt-6 flex flex-wrap justify-center gap-3">
             <Link
+              prefetch={false}
               href="/signup"
               className="flex justify-center items-center h-11 rounded-xl bg-gradient-to-r from-violet-500 to-cyan-400 px-5 text-sm font-bold text-black hover:brightness-110"
             >
               Get Started
             </Link>
             <Link
+              prefetch={false}
               href="/login"
               className="flex justify-center items-center h-11 rounded-xl border border-white/15 bg-white/5 px-5 text-sm font-semibold text-white hover:bg-white/10"
             >

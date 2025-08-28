@@ -1,13 +1,14 @@
 "use client";
 
 import { useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { useAuth } from "@/store/auth";
 import { toast } from "sonner";
 
 export default function LoginPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { login, loading, error } = useAuth();
   const [email, setEmail] = useState("");
   const [pw, setPw] = useState("");
@@ -20,8 +21,10 @@ export default function LoginPage() {
     
     try {
       await login(email, pw);
+      const next = searchParams.get("next") || "/exchange";
       toast("Logged in successfully");
-      router.push("/exchange");
+      router.replace(next);
+      router.refresh();
     } catch (e: any) {
       toast("Failed to login", {
         description: e.message,
