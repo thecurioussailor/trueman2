@@ -1,0 +1,6 @@
+**/target
+client/.next
+client/node_modules
+.git
+Dockerfile
+**/*.log
