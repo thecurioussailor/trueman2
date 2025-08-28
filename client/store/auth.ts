@@ -42,6 +42,8 @@ type AuthState = {
           try {
             const { data } = await api.post<{ token: string; email: string, id: string }>(admin ? "/admin/login" : "/login", { email, password });
             localStorage.setItem("authToken", data.token);
+            const maxAge = 60*60*24*30;
+            document.cookie = `authToken=${data.token}; Max-Age=${maxAge}; Path=/; SameSite=Lax`;
             set({ token: data.token, email: data.email, isAdmin: !!admin, id: data.id.toString() });
             console.log(data);
           } catch (e: any) {
@@ -53,6 +55,9 @@ type AuthState = {
         },
         logout: () => {
           localStorage.removeItem("authToken");
+          if (typeof document !== "undefined") {
+            document.cookie = "authToken=; Max-Age=0; Path=/; SameSite=Lax";
+          }
           set({ token: null, email: null, isAdmin: false, error: null });
         },
       }),

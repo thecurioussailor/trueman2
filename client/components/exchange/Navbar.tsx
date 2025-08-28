@@ -128,7 +128,7 @@ const Navbar = () => {
                     </div>
                 </MenubarItem>
                 <MenubarSeparator />
-                <MenubarItem>
+                <MenubarItem className="bg-transparent">
                     <Wallet />
                 </MenubarItem>
                 <MenubarSeparator />
