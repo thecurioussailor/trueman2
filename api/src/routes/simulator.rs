@@ -33,7 +33,8 @@ pub async fn start_simulator(req: HttpRequest, body: Json<StartSimulatorRequest>
 
     let msg_json = serde_json::to_string(&*body).unwrap();
 
-    let client = match redis::Client::open("redis://127.0.0.1:6379/") {
+    let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://redis:6379/".into());
+    let client = match redis::Client::open(url) {
         Ok(c) => c,
         Err(e) => return HttpResponse::InternalServerError().json(format!("redis error: {e}")),
     };
