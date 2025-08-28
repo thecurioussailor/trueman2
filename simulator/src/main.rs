@@ -47,8 +47,8 @@ struct CreateOrderReq {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let redis_url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379/".into());
-    let api = std::env::var("API_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".into());
+    let redis_url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://redis:6379/".into());
+    let api = std::env::var("API_URL").unwrap_or_else(|_| "http://api:8080".into());
     control_loop(redis_url, api).await
 }
 

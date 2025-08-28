@@ -235,7 +235,8 @@ static REDIS_MANAGER: OnceCell<RedisManager> = OnceCell::const_new();
 pub async fn get_redis_manager() -> &'static RedisManager {
     REDIS_MANAGER
         .get_or_init(|| async {
-            RedisManager::new("redis://127.0.0.1:6379/")
+            let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://redis:6379/".into());
+            RedisManager::new(&url)
                 .await
                 .expect("Failed to create Redis manager")
         })

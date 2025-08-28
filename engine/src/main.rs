@@ -15,11 +15,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("🚀 Starting Matching Engine...");
     
     // Connect to Redis
-    let redis_manager = EngineRedisManager::new("redis://127.0.0.1:6379/").await?;
+    let redis_url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://redis:6379/".into());
+    let redis_manager = EngineRedisManager::new(&redis_url).await?;
     info!("✅ Connected to Redis");
 
     // Create TradingEngine instance
-    let mut trading_engine = TradingEngine::new("redis://127.0.0.1:6379/").await?;
+    let mut trading_engine = TradingEngine::new(&redis_url).await?;
     info!("✅ TradingEngine initialized");
 
       // Load markets from database
@@ -44,7 +45,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         match redis_manager.consume_messages(consumer_group, consumer_name, 10).await {
             Ok(messages) => {
-                println!("🔍 Received messages: {:?}", messages);
                 if !messages.is_empty() {
                     info!("📥 Received {} messages to process", messages.len());
                     

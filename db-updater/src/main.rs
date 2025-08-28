@@ -69,7 +69,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
     tracing::info!("🗃️ Starting DB-Updater Service...");
     
-    let redis_client = Client::open("redis://127.0.0.1:6379/")?;
+ 
+    let redis_url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://redis:6379/".into());
+    let redis_client = Client::open(redis_url)?;
     let mut conn = redis_client.get_async_connection().await?;
     let mut db_conn = establish_connection();
     
