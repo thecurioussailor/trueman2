@@ -51,6 +51,9 @@ async fn main() -> std::io::Result<()> {
         }
     });
 
+    let host = std::env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
+    let port: u16 = std::env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8080);
+
     HttpServer::new(move || {
         App::new()
             .wrap(Logger::default())
@@ -88,7 +91,7 @@ async fn main() -> std::io::Result<()> {
                     .service(delete_market)
             )
     })
-    .bind(("127.0.0.1", 8080))?
+    .bind((host.as_str(), port))?
     .run()
     .await
 }
