@@ -109,25 +109,25 @@ export default function TradePairPage() {
       useMarketFeedStore.getState().subscribeMarket(marketId);
     }, [marketId]);
 
-    // useEffect(() => {
-    //   if (!marketId || !currentMarket) return;
-    //   (async () => {
-    //     const start_mid = await fetchStartMidTruncated(pair as string);
-    //     useSimulator.getState().start({
-    //     market_id: marketId,
-    //     base_token_id: currentMarket.base_currency.id,
-    //     quote_token_id: currentMarket.quote_currency.id,
-    //     users: 8,
-    //     base_deposit: 0.1,
-    //     quote_deposit: 100,
-    //     order_rate_ms: 100,
-    //     min_qty: 0.001,
-    //     max_qty: 0.01,
-    //     start_mid: start_mid,
-    //     tick: 0.01,
-    //   });
-    // })();
-    // }, [marketId, currentMarket, pair]);
+    useEffect(() => {
+      if (!marketId || !currentMarket) return;
+      (async () => {
+        const start_mid = await fetchStartMidTruncated(pair as string);
+        useSimulator.getState().start({
+        market_id: marketId,
+        base_token_id: currentMarket.base_currency.id,
+        quote_token_id: currentMarket.quote_currency.id,
+        users: 8,
+        base_deposit: 0.1,
+        quote_deposit: 100,
+        order_rate_ms: 100,
+        min_qty: 0.001,
+        max_qty: 0.01,
+        start_mid: start_mid,
+        tick: 0.01,
+      });
+    })();
+    }, [marketId, currentMarket, pair]);
 
 // Add loading state while market data is being fetched
 if (marketId && !currentMarket) {
