@@ -26,7 +26,7 @@ const Navbar = () => {
     const [isSearchFocused, setIsSearchFocused] = useState(false);
     const [depositOpen, setDepositOpen] = useState(false);
     const [withdrawOpen, setWithdrawOpen] = useState(false);
-    const { logout } = useAuth();
+    const { email, logout } = useAuth();
     const router = useRouter();
     const searchRef = useRef<HTMLDivElement>(null);
 
@@ -121,9 +121,11 @@ const Navbar = () => {
                         <CgProfile size={50} />
                     </div>
                     <div className="flex flex-col items-start">
-                        Ashutosh Sagar
+                        <span className="text-sm font-medium">
+                          {email?.split("@")[0]}
+                        </span>
                         <span className="text-xs text-muted-foreground">
-                            ashutoshsagar@gmail.com
+                        {email}
                         </span>
                     </div>
                 </MenubarItem>
