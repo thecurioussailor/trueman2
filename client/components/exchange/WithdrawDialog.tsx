@@ -59,6 +59,10 @@ export default function WithdrawDialog({ open, onOpenChange }: Props) {
       img: `https://backpack.exchange/_next/image?url=%2Fcoins%2F${t.symbol.toLowerCase()}.png&w=96&q=95`,
     }));
     setFilteredTokens(mapped as Token[]);
+    if (!asset && mapped.length) {
+      setAsset(mapped[0] as Token);
+      setNetwork(TOKEN_NETWORKS[mapped[0].symbol as keyof typeof TOKEN_NETWORKS]?.[0] ?? null);
+    }
   }, [open, tokens]);
 
   if (!open) return null;

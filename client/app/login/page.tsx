@@ -81,12 +81,6 @@ export default function LoginPage() {
             />
           </label>
 
-          {error && (
-            <div className="mb-2 rounded-md border border-rose-500/30 bg-rose-500/10 p-2 text-sm text-rose-300">
-              {error}
-            </div>
-          )}
-
           <button
             type="submit"
             disabled={!canSubmit}
