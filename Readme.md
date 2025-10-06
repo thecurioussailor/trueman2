@@ -9,6 +9,15 @@ TrueMan2 follows a microservices architecture designed for high performance and 
 
 ## 🚀 Core Services
 
+trueman2/
+  ├── api/              # Instead of /api
+  ├── engine/           # Instead of /simulator  
+  ├── ws/               # Instead of /engine
+  ├── db-updater/       # Instead of /ws
+  ├── simulator/        # Instead of /db-updater
+  └── client/           # Instead of /db-updater
+
+
 ### 1. **API Service** (`/api`)
 - **Framework**: Actix Web (Rust)
 - **Purpose**: REST API endpoints for trading operations
@@ -63,3 +72,26 @@ TrueMan2 follows a microservices architecture designed for high performance and 
   - Real-time charts and order books
   - Responsive design
   - Dark/light theme support
+
+## 🛠️ Technology Stack
+
+### Backend (Rust)
+- **Actix Web**: High-performance HTTP server
+- **Tokio**: Async runtime for concurrency
+- **Diesel**: Type-safe SQL ORM
+- **Redis**: Message queuing and caching
+- **JWT**: Stateless authentication
+- **UUID**: Unique identifiers
+
+### Frontend (TypeScript)
+- **Next.js 15**: React framework with SSR
+- **Tailwind CSS**: Utility-first styling
+- **Radix UI**: Accessible component primitives
+- **Zustand**: Lightweight state management
+- **Axios**: HTTP client
+
+### Infrastructure
+- **PostgreSQL**: Primary database
+- **Redis**: Message broker and cache
+- **Docker**: Containerization
+- **Docker Compose**: Multi-service orchestration
