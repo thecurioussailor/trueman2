@@ -5,7 +5,6 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useMarketFeedStore } from '@/store/marketFeed';
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from '../ui/button';
-import { fromAtomic } from '@/lib/units';
 type OBRow = { price: number; size: number };
 type RowView = OBRow & { total: number; pct: number; bg: string };
 
@@ -154,8 +153,8 @@ export default function BookTrades() {
                   {(asksDepth.length ? asksDepth : []).map((r, i) => (
                     <div key={`a-${i}`} className="flex justify-between border-t border-white/10" style={{ backgroundImage: r.bg, backgroundRepeat: 'no-repeat' }}>
                       <div className="px-2 py-1.5 text-rose-400">{r.price.toFixed(2)}</div>
-                      <div className="px-2 py-1.5">{r.size}</div>
-                      <div className="px-2 py-1.5">{r.total}</div>
+                      <div className="px-2 py-1.5">{Number(r.size).toFixed(2)}</div>
+                      <div className="px-2 py-1.5">{Number(r.total).toFixed(2)}</div>
                     </div>
                   ))}
                   <div ref={midRowRef} className="flex items-center justify-between bg-white/5">
@@ -179,8 +178,8 @@ export default function BookTrades() {
                   {(bidsDepth.length ? bidsDepth : []).map((r, i) => (
                     <div key={`b-${i}`} className="flex justify-between border-t border-white/10" style={{ backgroundImage: r.bg, backgroundRepeat: 'no-repeat' }}>
                       <div className="px-2 py-1.5 text-emerald-400">{r.price.toFixed(2)}</div>
-                      <div className="px-2 py-1.5">{r.size}</div>
-                      <div className="px-2 py-1.5">{r.total}</div>
+                      <div className="px-2 py-1.5">{Number(r.size).toFixed(2)}</div>
+                      <div className="px-2 py-1.5">{Number(r.total).toFixed(2)}</div>
                     </div>
                   ))}
               </div>
